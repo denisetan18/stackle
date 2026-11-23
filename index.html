@@ -1118,14 +1118,79 @@ const fmtHrs=min=>(+((Number(min)||0)/60).toFixed(2))+'h'; // minutes -> '1h', '
 const chapIsChallenging=c=>c&&(c.challenging!==undefined?!!c.challenging:(Number(c.difficulty)||0)>=4);
 function chapLen(c){return Math.max(1,Math.ceil((Number(c.durationMin)||30)/30));}
 
+// ── Not enough free time before a deadline? Scale the plan down to the time that is actually left. ──
+// Free slots before the deadline, using the same extended window as squeezeInto (only fixed schedules and
+// already-placed blocks are off-limits).
+function freeSlotsBefore(asgn,from,end){
+  const now=new Date(),todayK=dateKey(now),nowS=Math.min(SLOTS,now.getHours()*2+(now.getMinutes()>=30?1:0)+1);
+  let n=0,cur=new Date(from);
+  while(cur<=end){
+    const ds=dateKey(cur),{fx,tx}=gridForDate(ds,asgn);
+    for(let i=(ds===todayK?nowS:10);i<SLOTS;i++)if(isFree(fx,tx,i))n++;
+    cur=addDays(cur,1);
+  }
+  return n;
+}
+// Splits `total` slots across `items` in proportion to their sizes (largest-remainder), at least 1 slot each
+// when there is room; if there are fewer slots than items, earlier items get one slot each.
+function allocateSlots(items,total){
+  const sum=items.reduce((a,b)=>a+b,0);
+  if(sum<=total)return items.slice();
+  if(total<items.length){const o=items.map(()=>0);for(let i=0;i<items.length&&total>0;i++){o[i]=1;total--;}return o;}
+  const out=items.map(x=>Math.max(1,Math.floor(x*total/sum)));
+  let used=out.reduce((a,b)=>a+b,0);
+  while(used>total){let k=-1;out.forEach((v,i)=>{if(v>1&&(k<0||v>=out[k]))k=i;});if(k<0)break;out[k]--;used--;}
+  while(used<total){let k=0,best=-1;items.forEach((x,i)=>{const r=x*total/sum-out[i];if(out[i]<x&&r>best){best=r;k=i;}});out[k]++;used++;}
+  return out;
+}
+let lastCompressed=[]; // [{taskName, fromSlots, toSlots}] — tasks whose time was scaled down to fit
+function removeTaskBlocks(asgn,taskId){for(let i=asgn.length-1;i>=0;i--)if(asgn[i].taskId===taskId)asgn.splice(i,1);}
+
 function scheduleRegular(task,asgn,today){
+  const first=scheduleRegularCore(task,asgn,today,null);
+  if(!first.length||(task.startTime&&task.endTime))return first;
+  const due=parseDate(task.dueDate),dl=due>today?due:today;
+  removeTaskBlocks(asgn,task.id);
+  const tot=Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
+  const free=freeSlotsBefore(asgn,today,dl);
+  if(free<=0||free>=tot)return scheduleRegularCore(task,asgn,today,null); // nothing to scale — keep the normal result and warning
+  const second=scheduleRegularCore(task,asgn,today,free);
+  lastCompressed.push({taskName:task.name,fromSlots:tot,toSlots:free});
+  return second;
+}
+function scheduleExam(task,asgn,today){
+  const first=scheduleExamCore(task,asgn,today,null);
+  if(!first.length)return first;
+  const due=parseDate(task.dueDate);
+  const fullEnd=addDays(due,-1)>today?addDays(due,-1):today;
+  const totalDays=Math.max(1,Math.round((due-today)/86400000)+1);
+  const hasRev=totalDays>2;
+  const chaps=examChaps(task);
+  const study=chaps.map(chapLen);
+  const rev=chaps.map((c,i)=>Math.max(1,Math.round(study[i]*(chapIsChallenging(c)?0.5:0.25))));
+  removeTaskBlocks(asgn,task.id);
+  const free=freeSlotsBefore(asgn,today,fullEnd);
+  const items=hasRev?study.concat(rev):study.slice();
+  const need=items.reduce((a,b)=>a+b,0);
+  if(free<=0||free>=need)return scheduleExamCore(task,asgn,today,null); // nothing to scale — keep the normal result and warning
+  const scaled=allocateSlots(items,free); // study time and revision time shrink by the same proportion
+  const plan={study:scaled.slice(0,study.length),rev:hasRev?scaled.slice(study.length):study.map(()=>0)};
+  const second=scheduleExamCore(task,asgn,today,plan);
+  lastCompressed.push({taskName:task.name,fromSlots:need,toSlots:Math.min(free,need)});
+  // chapters that could not be given even 30 minutes (fewer free slots than chapters) are reported, not silently dropped
+  plan.study.forEach((n,idx)=>{ if(n<=0)second.push({taskName:task.name,len:study[idx],detail:'study: '+chapName(task,idx),
+    reason:'no free time left before the exam — all remaining free time was shared across the other chapters',
+    windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(study[idx]*30)+'min needed)'}); });
+  return second;
+}
+function scheduleRegularCore(task,asgn,today,totOverride){
   const uns=[],due=parseDate(task.dueDate);
   let sizes;
   if(task.startTime&&task.endTime){ // start/end = each session's window; "sessions" = how many of them
     const len1=Math.max(1,Math.ceil((timeToMin(task.endTime)-timeToMin(task.startTime))/30));
     sizes=new Array(Math.max(1,Number(task.sessions)||1)).fill(len1);
   }else{ // total time needed (hours entered by the student)
-    const tot=Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
+    const tot=totOverride||Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
     // keep each sitting to at most 2 hours (and never longer than the daily study limit) — split further if needed
     const capSlots=Math.max(1,Math.min(4,Math.floor(Math.min(schoolDayCapHours,nonSchoolDayCapHours)*2)));
     const ses=Math.min(tot,Math.max(Number(task.sessions)||1,Math.ceil(tot/capSlots)));
@@ -1181,11 +1246,11 @@ function diagnoseWindow(task,asgn,len,from,end){
   return reasons.slice(0,4).join(' | ')+(reasons.length>4?' | …'+(reasons.length-4)+' more days':'');
 }
 
-function scheduleExam(task,asgn,today){
+function scheduleExamCore(task,asgn,today,plan){
   const uns=[],due=parseDate(task.dueDate);
   const totalDays=Math.max(1,Math.round((due-today)/86400000)+1);
   const chaps=examChaps(task);
-  const chSizes=chaps.map(chapLen); // total 30-min slots needed per chapter
+  const chSizes=plan?plan.study:chaps.map(chapLen); // total 30-min slots needed per chapter (plan = scaled-down lengths when time is short)
   let revDays,studyDays;
   if(totalDays<=2){studyDays=totalDays;revDays=0;}
   else{revDays=Math.max(2,Math.min(4,Math.round(totalDays*0.3)));if(revDays>=totalDays)revDays=Math.max(1,totalDays-1);studyDays=totalDays-revDays;}
@@ -1201,6 +1266,7 @@ function scheduleExam(task,asgn,today){
   order.forEach(idx=>{
     const chapter=chaps[idx];
     const totalLen=chSizes[idx];
+    if(totalLen<=0)return;
     // Split this chapter's total study time into N sessions (student-configurable in
     // the chapters editor, e.g. a 3h chapter as 3x1h sessions instead of one 3h block).
     const sessionCount=Math.max(1,Math.min(8,Number(chapter.sessions)||1));
@@ -1246,7 +1312,8 @@ function scheduleExam(task,asgn,today){
     while(dc<=fullEnd){rl.push(new Date(dc));dc=addDays(dc,1);}
     if(!rl.length)rl.push(fullEnd<revFloorBase?revFloorBase:fullEnd);
     chSizes.forEach((len,idx)=>{
-      const rlen=Math.max(1,Math.round(len*(chapIsChallenging(chaps[idx])?0.5:0.25))); // starred chapters get double revision time
+      const rlen=plan?plan.rev[idx]:Math.max(1,Math.round(len*(chapIsChallenging(chaps[idx])?0.5:0.25))); // starred chapters get double revision time
+      if(rlen<=0)return;
       const td=rl[idx%rl.length];
       const extra={sessionIndex:idx,phase:'revision',overdue:false,chapterSessionNum:1,chapterSessionTotal:1};
       // All revision passes search from revFloorBase forward (never 'today') so a quick
@@ -1295,7 +1362,7 @@ function scheduleFollowUp(task,chIdx,rating){
   return placeChunk(task,assignments,len,today,wend,{sessionIndex:chIdx,phase,overdue:false});
 }
 function runScheduler(){
-  assignments=[];lastUnscheduled=[];
+  assignments=[];lastUnscheduled=[];lastCompressed=[];
   const today=startOfDay(new Date());
   [...variableTasks].sort((a,b)=>{
     const dc=a.dueDate.localeCompare(b.dueDate);
@@ -1977,7 +2044,15 @@ function renderTasksSheet(body){
           ${u.windowDesc?`<div style="font-size:11px;color:#a05548;margin-top:2px;">${u.windowDesc}</div>`:''}
           ${u.reason?`<div style="font-size:11px;margin-top:3px;line-height:1.5;">Why: ${u.reason}</div>`:''}
         </div>`).join('')}
-      <div style="font-size:11px;margin-top:8px;color:#a05548;">💡 Try: reduce chapter durations, raise your daily study cap in ⚙️ Settings, or free up fixed-schedule time.</div>
+      <div style="font-size:11px;margin-top:8px;color:#a05548;">💡 Try: reduce chapter durations, free up fixed-schedule time, or move the deadline.</div>
+    </div>`;
+  }
+
+  if(lastCompressed.length){
+    html+=`<div style="background:var(--sun-soft);border-radius:10px;padding:12px 14px;font-size:12.5px;color:#7A5A00;margin-bottom:14px;line-height:1.5;">
+      <b>ℹ️ Study time was scaled down to fit before the deadline:</b>
+      ${lastCompressed.map(c=>`<div style="margin-top:6px;">• <b>${c.taskName}</b> — only ${fmtHrs(c.toSlots*30)} of free time is left, so its ${fmtHrs(c.fromSlots*30)} plan was shared out in proportion across all chapters/sessions.</div>`).join('')}
+      <div style="font-size:11px;margin-top:8px;opacity:.85;">Free up fixed-schedule time or move the deadline, then press Re-schedule to get the full time back.</div>
     </div>`;
   }
 
