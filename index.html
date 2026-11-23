@@ -1105,11 +1105,11 @@ function scheduleRegular(task,asgn,today){
     if(target>cur)cur=target;
     const h=addDays(due>today?due:today,14);
     const p=placeChunk(task,asgn,len,cur,h,{sessionIndex:i,phase:'task'});
-    if(p){asgn[asgn.length-1].overdue=p>due;cur=addDays(p,1);}
+    if(p){asgn[asgn.length-1].overdue=p>due;cur=p;}
     else{
       // Retry from today before giving up (cur may have advanced past the horizon)
       const p2=placeChunk(task,asgn,len,today,h,{sessionIndex:i,phase:'task'});
-      if(p2){asgn[asgn.length-1].overdue=p2>due;cur=addDays(p2,1);}
+      if(p2){asgn[asgn.length-1].overdue=p2>due;cur=p2;}
       else uns.push({taskName:task.name,len,detail:'session '+(i+1),
         reason:diagnoseWindow(task,asgn,len,today,h),
         windowDesc:'searched '+dateKey(today)+' → '+dateKey(h)+' ('+(len*30)+'min block)'});
@@ -1183,7 +1183,7 @@ function scheduleExam(task,asgn,today){
       // instead of leaving the chapter permanently unscheduled — flagged overdue
       // so the calendar clearly shows this was a forced catch-up, not a plan.
       if(!p)p=placeChunk(task,asgn,len,sCur,graceEnd,Object.assign({},extra,{phase:'study-late',overdue:true}));
-      if(p)sCur=addDays(p,1);
+      if(p)sCur=p; // next session may share this day (the daily cap is soft) — chaining one session per day ran past the exam
       else uns.push({taskName:task.name,len,detail:'study: '+chapName(task,idx)+(sessionSizes.length>1?' (session '+(sIdx+1)+'/'+sessionSizes.length+')':''),
         reason:diagnoseWindow(task,asgn,len,today,fullEnd),
         windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(len*30)+'min block)'});
