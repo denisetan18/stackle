@@ -99,6 +99,8 @@ input,select,textarea{font-family:inherit;color:var(--ink);}
 .block.task{cursor:grab;}
 .block.done{opacity:.55;}
 .block.overdue{border-style:dashed;}
+.resize-handle{position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize;background:transparent;border-radius:0 0 6px 6px;}
+.resize-handle:hover{background:rgba(255,255,255,0.4);}
 .block.dragging{opacity:.3;}
 .now-line{position:absolute;left:0;right:0;height:0;border-top:2px solid var(--coral);z-index:3;}
 .now-line::before{content:"";position:absolute;left:-4px;top:-4px;width:8px;height:8px;border-radius:50%;background:var(--coral);}
@@ -151,7 +153,6 @@ input,select,textarea{font-family:inherit;color:var(--ink);}
 .fs-card{background:var(--bg);border-radius:var(--r-sm);padding:11px 14px;margin-bottom:8px;
   display:flex;align-items:center;gap:12px;}
 .fs-dot{width:10px;height:10px;border-radius:50%;background:var(--grey);flex-shrink:0;}
-.fs-dot.blue{background:#4D8DEE;}
 .fs-body{flex:1;}
 .fs-name{font-size:14px;font-weight:700;}
 .fs-meta{font-size:11.5px;color:var(--ink-soft);}
@@ -431,6 +432,7 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
         <button class="dtb-tab active" data-dtab="cal">📅 Calendar</button>
         <button class="dtb-tab" data-dtab="tasks">📋 Variable Tasks</button>
         <button class="dtb-tab" data-dtab="schedule">📌 Fixed Schedule</button>
+        <button class="dtb-tab" data-dtab="quiz">🧠 Quiz History</button>
         <button class="dtb-tab" data-dtab="me">🏅 Me</button>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
@@ -553,6 +555,7 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
       <button class="nav-btn active" data-tab="cal"><span class="nav-icon">📅</span><span class="nav-label">Calendar</span></button>
       <button class="nav-btn" data-tab="tasks"><span class="nav-icon">📋</span><span class="nav-label">Tasks</span></button>
       <button class="nav-btn" data-tab="schedule"><span class="nav-icon">📌</span><span class="nav-label">Schedule</span></button>
+      <button class="nav-btn" data-tab="quiz"><span class="nav-icon">🧠</span><span class="nav-label">Quiz</span></button>
       <button class="nav-btn" data-tab="notes"><span class="nav-icon">📝</span><span class="nav-label">Notes</span></button>
       <button class="nav-btn" data-tab="me"><span class="nav-icon">🏅</span><span class="nav-label">Me</span></button>
     </div>
@@ -598,7 +601,7 @@ const SLOTS=48,ROWH=26,STUDY_S=12,STUDY_E=46,NOW_BUF=2,SCH_BUF=4;
 const MAX_CONSEC=8;
 const DAY_NAMES=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const TASK_PALETTE=['#FF6B5B','#3FBF93','#8E7CC3','#F2B134','#FF9F5B','#B5651D','#D162B4','#7BC142'];
-const uid=()=>'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const uid=()=>'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); // unique across sessions/devices
 
 // Stickers
 const STICKERS_COMMON=['🍎','🍊','🍋','🍇','🍓','🍒','🍑','🥭','🌸','🌺','🌻','🌹','🌼','🌷','💐','🍀','🌈'];
@@ -651,16 +654,7 @@ const FIREBASE_CONFIG={
 };
 const CLOUD=!!FIREBASE_CONFIG.apiKey&&typeof firebase!=='undefined';
 let fbAuth=null,fbDb=null;
-if(CLOUD){
-  firebase.initializeApp(FIREBASE_CONFIG);fbAuth=firebase.auth();fbDb=firebase.firestore();
-  // Falls back to long-polling when the default streaming connection is blocked (file:// pages, some networks/VPNs) — otherwise Firestore calls can hang.
-  try{fbDb.settings({experimentalAutoDetectLongPolling:true,merge:true});}catch(e){console.warn(e);}
-}
-// Never let a network call spin forever: reject with a code cloudErr() understands.
-function withTimeout(p,ms){
-  let t;
-  return Promise.race([p,new Promise((_,rej)=>{t=setTimeout(()=>rej({code:'stackle/timeout'}),ms);})]).finally(()=>clearTimeout(t));
-}
+if(CLOUD){firebase.initializeApp(FIREBASE_CONFIG);fbAuth=firebase.auth();fbDb=firebase.firestore();}
 const DEVICE_ID=Math.random().toString(36).slice(2)+Date.now().toString(36);
 
 const STORAGE_KEY='daystack_users_v1';
@@ -677,7 +671,8 @@ function emptyUserData(){
   return{
     variableTasks:[],fixedSchedules:[],assignments:[],completedSlotsArr:[],stickers:{},
     weeklyChecklist:[],dailyChecklist:[],notes:'',dayReminders:{},friends:[],
-    settings:{schoolDayCapHours:4,nonSchoolDayCapHours:6},
+    practiceQuizHistory:{},
+    settings:{schoolDayCapHours:4,nonSchoolDayCapHours:6,studentLevel:''},
     tutorialDone:false,tutorialStep:0, // false => show the first-time guided setup. Older accounts have no flag, so they skip it.
   };
 }
@@ -693,9 +688,6 @@ function cloudErr(e){
   if(c==='auth/too-many-requests')return 'Too many attempts. Wait a moment and try again.';
   if(c==='auth/network-request-failed'||c==='unavailable')return 'Network error — check your connection.';
   if(c==='permission-denied')return 'Server rejected the request — check the Firestore rules.';
-  if(c==='stackle/timeout'||c==='unavailable'||c==='failed-precondition')return "Couldn't reach the database. In the Firebase console, make sure Firestore Database is created (Build → Firestore Database) and the rules are published, then try again.";
-  if(c==='auth/operation-not-allowed')return 'Email/Password sign-in is not enabled. In Firebase: Build → Authentication → Sign-in method → enable Email/Password.';
-  if(c==='auth/invalid-api-key'||c==='auth/api-key-not-valid.-please-pass-a-valid-api-key.')return 'Firebase config is invalid — check FIREBASE_CONFIG.';
   return 'Something went wrong ('+(c||e.message||'unknown')+').';
 }
 
@@ -706,8 +698,8 @@ async function loginUser(username,password){
     if(!username||!password)return 'Enter your username and password.';
     authBusy=true;
     try{
-      const cred=await withTimeout(fbAuth.signInWithEmailAndPassword(usernameToEmail(username),password),20000);
-      return await withTimeout(startCloudSession(cred.user),20000);
+      const cred=await fbAuth.signInWithEmailAndPassword(usernameToEmail(username),password);
+      return await startCloudSession(cred.user);
     }catch(e){return cloudErr(e);}
     finally{authBusy=false;}
   }
@@ -718,6 +710,7 @@ async function loginUser(username,password){
   currentUser={username:username.toLowerCase(),displayName:u.displayName||username};
   ud=u.data||emptyUserData();
   hydrateState();
+  saveCurrentData(); // checkpoint immediately on login
   return null;
 }
 async function signupUser(username,password,displayName){
@@ -727,13 +720,13 @@ async function signupUser(username,password,displayName){
     if(password.length<6)return 'Password must be at least 6 characters.';
     authBusy=true;
     try{
-      const cred=await withTimeout(fbAuth.createUserWithEmailAndPassword(usernameToEmail(username),password),20000);
+      const cred=await fbAuth.createUserWithEmailAndPassword(usernameToEmail(username),password);
       const uname=username.toLowerCase(),dn=displayName||username;
       const batch=fbDb.batch();
       batch.set(fbDb.collection('users').doc(cred.user.uid),{username:uname,displayName:dn,dataJson:JSON.stringify(emptyUserData()),deviceId:DEVICE_ID,updatedAt:Date.now()});
       batch.set(fbDb.collection('profiles').doc(uname),{uid:cred.user.uid,displayName:dn,stickersJson:'{}'});
-      await withTimeout(batch.commit(),20000);
-      return await withTimeout(startCloudSession(cred.user),20000);
+      await batch.commit();
+      return await startCloudSession(cred.user);
     }catch(e){return cloudErr(e);}
     finally{authBusy=false;}
   }
@@ -796,8 +789,9 @@ function collectUserData(){
   ud.variableTasks=variableTasks;
   ud.fixedSchedules=fixedSchedules;
   ud.assignments=assignments;
-  ud.settings={schoolDayCapHours,nonSchoolDayCapHours};
+  ud.settings={schoolDayCapHours,nonSchoolDayCapHours,studentLevel};
   ud.friends=friends;
+  ud.practiceQuizHistory=practiceQuizHistory;
   // ud.notes is kept current by the notes textareas' input listeners
   return ud;
 }
@@ -903,7 +897,7 @@ async function refreshFriendProfiles(){
 
 function hydrateState(){
   variableTasks=ud.variableTasks||[];
-  variableTasks.forEach(v=>{if(v.color==='#4D8DEE')v.color='#F2B134';else if(v.color==='#46B8C2')v.color='#B5651D';}); // blue is now reserved for fixed schedules
+  variableTasks.forEach(v=>{if(v.color==='#4D8DEE')v.color='#F2B134';else if(v.color==='#46B8C2')v.color='#B5651D';}); // blue is reserved for fixed schedules
   fixedSchedules=ud.fixedSchedules||[];
   assignments=ud.assignments||[];
   completedSlots=new Set(ud.completedSlotsArr||[]);
@@ -912,9 +906,11 @@ function hydrateState(){
   dailyChecklist=ud.dailyChecklist||[];
   dayReminders=ud.dayReminders||{};
   friends=ud.friends||[];
+  practiceQuizHistory=ud.practiceQuizHistory||{};
   const s=ud.settings||{};
   schoolDayCapHours=s.schoolDayCapHours||4;
   nonSchoolDayCapHours=s.nonSchoolDayCapHours||6;
+  studentLevel=s.studentLevel||'';
 }
 
 /* =============================================
@@ -924,7 +920,9 @@ let variableTasks=[],fixedSchedules=[],assignments=[];
 let completedSlots=new Set();
 let stickers={}; // dateKey -> [{emoji,rarity}]
 let weeklyChecklist=[],dailyChecklist=[],dayReminders={},friends=[];
+let practiceQuizHistory={}; // "{subjectKey}-{itemId}" -> [{id,date,score,confidence,questions,userAnswers,notes}, ...]
 let schoolDayCapHours=4,nonSchoolDayCapHours=6;
+let studentLevel=''; // '' | 'sec1' | 'sec2' | 'sec3' | 'sec4-5' — filters which syllabus subjects are shown
 let weekStart=mondayOf(new Date());
 let viewStart=14,viewEnd=46,dayCount=7; // week view, 07:00-23:00 by default
 let lastUnscheduled=[];
@@ -1005,20 +1003,22 @@ function splitBlocks(tot,ses){
   return sz.filter(s=>s>0);
 }
 
-// 6-pass cascade — every rule (daily study cap, 1-hour buffer around fixed blocks,
-// and the 4-hour-consecutive-study break) is a SOFT preference, not a hard limit.
-// These rules only bind while there's still slack in the schedule. As the window
-// tightens toward a deadline, passes progressively relax rules — cap first, then
-// buffer, and only as an absolute last resort the consecutive-study break — so a
-// task is never left unscheduled just to protect a wellbeing rule. The deadline
-// always wins.
-//   Pass 1: cap✓ buffer✓ consec✓   (ideal — plenty of slack)
-//   Pass 2: cap✗ buffer✓ consec✓   (busy day, still gives rest + breaks)
-//   Pass 3: cap✓ buffer✗ consec✓   (skip pre/post-fixed-block buffer)
-//   Pass 4: cap✗ buffer✗ consec✓   (busy + no buffer, still forces a break every 4h)
-//   Pass 5: cap✓ buffer✓ consec✗   (deadline pressure — allow a longer study run)
-//   Pass 6: cap✗ buffer✗ consec✗   (deadline is critical — fit it wherever it physically fits)
-// Tasks with a start time try that time of day first (before the due date, then anywhere), then fall back to the normal cascade.
+// 8-pass cascade — every rule (daily study cap, 1-hour buffer around fixed blocks,
+// the 4-hour-consecutive-study break, and the 1-hour advance-notice buffer) is a
+// SOFT preference, not a hard limit. These rules only bind while there's still
+// slack in the schedule. As the window tightens toward a deadline, passes
+// progressively relax rules — cap first, then fixed-block buffer, then the
+// consecutive-study break, and only as an absolute last resort the advance-notice
+// buffer — so a task is never left unscheduled just to protect a wellbeing rule.
+// The deadline always wins.
+//   Pass 1: cap✓ buffer✓ consec✓ nowBuf✓   (ideal — plenty of slack)
+//   Pass 2: cap✗ buffer✓ consec✓ nowBuf✓   (busy day, still gives rest + breaks)
+//   Pass 3: cap✓ buffer✗ consec✓ nowBuf✓   (skip pre/post-fixed-block buffer)
+//   Pass 4: cap✗ buffer✗ consec✓ nowBuf✓   (busy + no buffer, still forces a break every 4h)
+//   Pass 5: cap✓ buffer✓ consec✗ nowBuf✓   (deadline pressure — allow a longer study run)
+//   Pass 6: cap✗ buffer✗ consec✗ nowBuf✓   (deadline is critical — fit it wherever it physically fits today)
+//   Pass 7: cap✗ buffer✗ consec✗ nowBuf✗   (start almost right now if that's the only way)
+// Tasks with a start time try that time of day first (before the due date, then anywhere), then use the normal cascade.
 function placeAtPreferred(task,asgn,len,from,end,extra){
   if(task.type==='exam'||!task.startTime||!extra||extra.phase!=='task')return null;
   const ps=timeToSlot(task.startTime);
@@ -1044,21 +1044,22 @@ function placeAtPreferred(task,asgn,len,from,end,extra){
 }
 function placeChunk(task,asgn,len,from,end,extra){
   return placeAtPreferred(task,asgn,len,from,end,extra)
-      || placePass(task,asgn,len,from,end,extra,true, true, true )
-      || placePass(task,asgn,len,from,end,extra,false,true, true )
-      || placePass(task,asgn,len,from,end,extra,true, false,true )
-      || placePass(task,asgn,len,from,end,extra,false,false,true )
-      || placePass(task,asgn,len,from,end,extra,true, true, false)
-      || placePass(task,asgn,len,from,end,extra,false,false,false);
+      || placePass(task,asgn,len,from,end,extra,true, true, true, true )
+      || placePass(task,asgn,len,from,end,extra,false,true, true, true )
+      || placePass(task,asgn,len,from,end,extra,true, false,true, true )
+      || placePass(task,asgn,len,from,end,extra,false,false,true, true )
+      || placePass(task,asgn,len,from,end,extra,true, true, false,true )
+      || placePass(task,asgn,len,from,end,extra,false,false,false,true )
+      || placePass(task,asgn,len,from,end,extra,false,false,false,false);
 }
 
-function placePass(task,asgn,len,from,end,extra,cap,respectBuffer,respectConsec){
+function placePass(task,asgn,len,from,end,extra,cap,respectBuffer,respectConsec,respectNowBuf){
   let cur=new Date(from);
   const now=new Date(),todayK=dateKey(now),nowS=now.getHours()*2+(now.getMinutes()>=30?1:0);
   while(cur<=end){
     const ds=dateKey(cur);
     let rS=STUDY_S;
-    if(ds===todayK)rS=Math.max(rS,nowS+NOW_BUF);
+    if(ds===todayK)rS=Math.max(rS,nowS+(respectNowBuf?NOW_BUF:0));
     const sf=schoolFloor(ds);rS=Math.max(rS,sf);
     if(rS<=STUDY_E-len){
       const{fx,tx}=gridForDate(ds,asgn);
@@ -1077,12 +1078,13 @@ function examChaps(task){
   return(Array.isArray(task.chapters)&&task.chapters.length)?task.chapters:[{name:'Chapter 1',durationMin:60,difficulty:3}];
 }
 function chapName(task,idx){const c=examChaps(task);return(c[idx]&&c[idx].name)||'Chapter '+(idx+1);}
+function ordinal(n){const s=['th','st','nd','rd'],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);}
 function chapLen(c){return Math.max(1,Math.ceil((Number(c.durationMin)||30)/30));}
 
 function scheduleRegular(task,asgn,today){
   const uns=[],due=parseDate(task.dueDate);
   let sizes;
-  if(task.startTime&&task.endTime){ // start/end time = each session's window; "sessions" = how many of them
+  if(task.startTime&&task.endTime){ // start/end = each session's window; "sessions" = how many of them
     const len1=Math.max(1,Math.ceil((timeToMin(task.endTime)-timeToMin(task.startTime))/30));
     sizes=new Array(Math.max(1,Number(task.sessions)||1)).fill(len1);
   }else{ // older tasks saved with a total duration
@@ -1137,38 +1139,72 @@ function scheduleExam(task,asgn,today){
   const uns=[],due=parseDate(task.dueDate);
   const totalDays=Math.max(1,Math.round((due-today)/86400000)+1);
   const chaps=examChaps(task);
-  const chSizes=chaps.map(chapLen);
+  const chSizes=chaps.map(chapLen); // total 30-min slots needed per chapter
   let revDays,studyDays;
   if(totalDays<=2){studyDays=totalDays;revDays=0;}
   else{revDays=Math.max(2,Math.min(4,Math.round(totalDays*0.3)));if(revDays>=totalDays)revDays=Math.max(1,totalDays-1);studyDays=totalDays-revDays;}
   const sWend=addDays(today,studyDays-1);
   const fullEnd=addDays(due,-1)>today?addDays(due,-1):today;
+  const graceEnd=addDays(due,7); // absolute last-resort catch-up window if nothing fit before the exam
   const revStart=addDays(sWend,1);
-  const order=chaps.map((_,i)=>i).sort((a,b)=>(chaps[b].difficulty||0)-(chaps[a].difficulty||0));
+  // Study in the order the student has arranged the chapters (drag-reorder in the
+  // chapters modal sets this directly) — this is now the student's explicit priority
+  // signal, e.g. putting harder/weaker chapters first if they want extra runway on them.
+  const order=chaps.map((_,i)=>i);
   let sCur=today;
   order.forEach(idx=>{
-    const len=chSizes[idx];
-    // Pass A: spread — search from the day after the last placement
-    let p=placeChunk(task,asgn,len,sCur,sWend,{sessionIndex:idx,phase:'study',overdue:false});
-    // Pass B: sCur may have advanced past the study window — retry from TODAY (stack same-day)
-    if(!p)p=placeChunk(task,asgn,len,today,sWend,{sessionIndex:idx,phase:'study',overdue:false});
-    // Pass C: study window full — use ANY day before the exam (late study)
-    if(!p)p=placeChunk(task,asgn,len,today,fullEnd,{sessionIndex:idx,phase:'study-late',overdue:false});
-    if(p)sCur=addDays(p,1);
-    else uns.push({taskName:task.name,len,detail:'study: '+chapName(task,idx),
-      reason:diagnoseWindow(task,asgn,len,today,fullEnd),
-      windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(len*30)+'min block)'});
+    const chapter=chaps[idx];
+    const totalLen=chSizes[idx];
+    // Split this chapter's total study time into N sessions (student-configurable in
+    // the chapters editor, e.g. a 3h chapter as 3x1h sessions instead of one 3h block).
+    const sessionCount=Math.max(1,Math.min(8,Number(chapter.sessions)||1));
+    const sessionSizes=splitBlocks(totalLen,sessionCount);
+    sessionSizes.forEach((len,sIdx)=>{
+      const extra={sessionIndex:idx,phase:'study',overdue:false,chapterSessionNum:sIdx+1,chapterSessionTotal:sessionSizes.length};
+      // All passes search forward from sCur (never reset back to 'today') so that later
+      // chapters in the list can never land on an earlier date than an earlier chapter —
+      // this keeps calendar blocks in the exact order the student arranged the chapters.
+      // Pass A: within the ideal study window
+      let p=placeChunk(task,asgn,len,sCur,sWend,extra);
+      // Pass B: study window full — use ANY day before the exam (late study)
+      if(!p)p=placeChunk(task,asgn,len,sCur,fullEnd,Object.assign({},extra,{phase:'study-late'}));
+      // Pass C: absolute last resort — even a fully-relaxed search of the entire
+      // pre-exam window found nothing. Squeeze it in shortly AFTER the exam date
+      // instead of leaving the chapter permanently unscheduled — flagged overdue
+      // so the calendar clearly shows this was a forced catch-up, not a plan.
+      if(!p)p=placeChunk(task,asgn,len,sCur,graceEnd,Object.assign({},extra,{phase:'study-late',overdue:true}));
+      if(p)sCur=addDays(p,1);
+      else uns.push({taskName:task.name,len,detail:'study: '+chapName(task,idx)+(sessionSizes.length>1?' (session '+(sIdx+1)+'/'+sessionSizes.length+')':''),
+        reason:diagnoseWindow(task,asgn,len,today,fullEnd),
+        windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(len*30)+'min block)'});
+    });
   });
+  // Compute the ACTUAL latest date any deep-study session landed on — not just the
+  // theoretical sWend, since a tight schedule can push some sessions into the
+  // 'study-late'/grace fallback tiers well past sWend. Revision must never start
+  // before this real floor, or a chapter's quick revision could land before another
+  // chapter's deep study for the same exam — breaking "study before revision" order.
+  const studyPlacements = asgn.filter(a=>a.taskId===task.id && (a.phase==='study'||a.phase==='study-late'));
+  const lastStudyDateStr = studyPlacements.length
+    ? studyPlacements.reduce((max,a)=> a.date>max?a.date:max, studyPlacements[0].date)
+    : dateKey(sWend);
+  const lastStudyDate = parseDate(lastStudyDateStr);
+  const revFloorBase = lastStudyDate>=revStart ? addDays(lastStudyDate,1) : revStart;
+
   if(revDays>0){
-    const rl=[];let dc=revStart<today?today:revStart;
+    const rl=[];let dc=revFloorBase<today?today:revFloorBase;
     while(dc<=fullEnd){rl.push(new Date(dc));dc=addDays(dc,1);}
-    if(!rl.length)rl.push(fullEnd);
+    if(!rl.length)rl.push(fullEnd<revFloorBase?revFloorBase:fullEnd);
     chSizes.forEach((len,idx)=>{
       const rlen=Math.max(1,Math.round(len*0.25));
       const td=rl[idx%rl.length];
-      let p=placeChunk(task,asgn,rlen,td,fullEnd,{sessionIndex:idx,phase:'revision',overdue:false});
-      // Fallback: revision anywhere from today if the tail is full
-      if(!p)p=placeChunk(task,asgn,rlen,today,fullEnd,{sessionIndex:idx,phase:'revision',overdue:false});
+      const extra={sessionIndex:idx,phase:'revision',overdue:false,chapterSessionNum:1,chapterSessionTotal:1};
+      // All revision passes search from revFloorBase forward (never 'today') so a quick
+      // revision can never be scheduled before deep study for this exam has happened.
+      let p=placeChunk(task,asgn,rlen,td,fullEnd,extra);
+      if(!p)p=placeChunk(task,asgn,rlen,revFloorBase,fullEnd,extra);
+      // Absolute last resort — same grace-window catch-up as study sessions above
+      if(!p)p=placeChunk(task,asgn,rlen,revFloorBase,graceEnd,Object.assign({},extra,{overdue:true}));
       if(!p)uns.push({taskName:task.name,len:rlen,detail:'revision: '+chapName(task,idx),
         reason:diagnoseWindow(task,asgn,rlen,today,fullEnd),
         windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(rlen*30)+'min block)'});
@@ -1287,6 +1323,42 @@ function renderWeek(){
   }
   updateStats();
 }
+// Clusters overlapping blocks (fixed schedule runs + task assignments) on a single day
+// and assigns each a {col, totalCols} so overlapping blocks render side-by-side instead
+// of stacking on top of each other — like Outlook/Google Calendar.
+// items: [{start,end,ref}]. Returns a Map keyed by `ref` (the fs object or assignment object).
+function computeDayLayout(fixedRuns, dayAssignments){
+  const items=[
+    ...fixedRuns.map(r=>({start:r.start,end:r.start+r.len,ref:r.ref})),
+    ...dayAssignments.map(a=>({start:a.startSlot,end:a.startSlot+a.len,ref:a})),
+  ];
+  items.sort((a,b)=>a.start-b.start||a.end-b.end);
+
+  // Sweep to group into overlap clusters (a run of items that transitively overlap)
+  const clusters=[];
+  let cur=[],curEnd=-Infinity;
+  items.forEach(it=>{
+    if(cur.length&&it.start>=curEnd){clusters.push(cur);cur=[];curEnd=-Infinity;}
+    cur.push(it);curEnd=Math.max(curEnd,it.end);
+  });
+  if(cur.length)clusters.push(cur);
+
+  const layout=new Map();
+  clusters.forEach(cluster=>{
+    // Greedy column packing within the cluster
+    const colEnds=[];
+    cluster.forEach(it=>{
+      let placedCol=-1;
+      for(let c=0;c<colEnds.length;c++){ if(colEnds[c]<=it.start){placedCol=c;break;} }
+      if(placedCol===-1){placedCol=colEnds.length;colEnds.push(it.end);}
+      else colEnds[placedCol]=it.end;
+      it._col=placedCol;
+    });
+    const totalCols=colEnds.length;
+    cluster.forEach(it=>layout.set(it.ref,{col:it._col,totalCols}));
+  });
+  return layout;
+}
 function _renderGrid(gridId,labelId){
   const grid=document.getElementById(gridId);
   const labelEl=document.getElementById(labelId);
@@ -1323,9 +1395,13 @@ function _renderGrid(gridId,labelId){
     col.style.height=(ROWH*vis)+'px';col.dataset.date=ds;
     col.style.backgroundImage=`repeating-linear-gradient(to bottom,transparent 0,transparent ${ROWH*2-1}px,var(--line) ${ROWH*2-1}px,var(--line) ${ROWH*2}px)`;
     const{fx,tx}=gridForDate(ds,assignments);
+    const fixedRuns=[];
     let i=0;while(i<SLOTS){
-      if(fx[i]){const fs=fx[i];let j=i;while(j<SLOTS&&fx[j]===fs)j++;const b=makeFixedBlock(fs,i,j-i,ds);if(b)col.appendChild(b);i=j;}else i++;}
-    assignments.filter(a=>a.date===ds).forEach(a=>{const b=makeTaskBlock(a);if(b)col.appendChild(b);});
+      if(fx[i]){const fs=fx[i];let j=i;while(j<SLOTS&&fx[j]===fs)j++;fixedRuns.push({start:i,len:j-i,ref:fs});i=j;}else i++;}
+    const dayAssignments=assignments.filter(a=>a.date===ds);
+    const layout=computeDayLayout(fixedRuns,dayAssignments);
+    fixedRuns.forEach(r=>{const L=layout.get(r.ref)||{col:0,totalCols:1};const b=makeFixedBlock(r.ref,r.start,r.len,ds,L);if(b)col.appendChild(b);});
+    dayAssignments.forEach(a=>{const L=layout.get(a)||{col:0,totalCols:1};const b=makeTaskBlock(a,L);if(b)col.appendChild(b);});
     if(ds===todayStr){
       const now=new Date(),frac=(now.getHours()*60+now.getMinutes())/30;
       if(frac>=viewStart&&frac<=viewEnd){const ln=document.createElement('div');ln.className='now-line';ln.style.top=((frac-viewStart)*ROWH)+'px';col.appendChild(ln);}}
@@ -1370,7 +1446,7 @@ function switchDesktopTab(tab){
   if(tab==='cal'){calP.style.display='flex';ctP.style.display='none';sb.style.display='flex';renderWeek();}
   else{calP.style.display='none';ctP.style.display='block';sb.style.display='none';
     const body=document.getElementById('desktopContentBody');
-    if(tab==='tasks')renderTasksSheet(body);else if(tab==='schedule')renderScheduleSheet(body);else if(tab==='me')renderProfileSheet(body);}
+    if(tab==='tasks')renderTasksSheet(body);else if(tab==='schedule')renderScheduleSheet(body);else if(tab==='quiz')renderQuizHistorySheet(body);else if(tab==='me')renderProfileSheet(body);}
 }
 document.getElementById('prevBtnD').onclick=()=>{weekStart=addDays(weekStart,-7);renderWeek();};
 document.getElementById('nextBtnD').onclick=()=>{weekStart=addDays(weekStart,7);renderWeek();};
@@ -1438,10 +1514,11 @@ window.addEventListener('resize',()=>{const d=isDesktop();if(d!==_lastDesktop){_
 function clipBlock(slot,len){const vS=Math.max(slot,viewStart),vE=Math.min(slot+len,viewEnd);return vE>vS?{top:(vS-viewStart)*ROWH,h:(vE-vS)*ROWH-2,ok:true}:{ok:false};}
 // Sleep and School stay grey; every other fixed schedule is blue.
 const fixedIsGrey=name=>/sleep|school/i.test(name||'');
-function makeFixedBlock(fs,slot,len,ds){
+function makeFixedBlock(fs,slot,len,ds,layout){
   const{top,h,ok}=clipBlock(slot,len);if(!ok)return null;
   const el=document.createElement('div');el.className='block fixed'+(fixedIsGrey(fs.name)?'':' blue');
   el.style.top=top+'px';el.style.height=h+'px';el.draggable=true;
+  applyOverlapPosition(el,layout);
   el.title=fs.name+' '+slotLabel(slot)+'–'+slotLabel(slot+len);
   el.innerHTML=`<span class="bname">${fs.name}</span><span class="btime">${slotLabel(slot)}–${slotLabel(slot+len)}</span>`;
   el.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',JSON.stringify({kind:'fixed',id:fs.id,fromDay:dayIdx(ds),len,grabOffset:e.offsetY}));el.classList.add('dragging');});
@@ -1449,7 +1526,16 @@ function makeFixedBlock(fs,slot,len,ds){
   el.addEventListener('click',e=>{e.stopPropagation();openFixedDetail(fs,slot,len);});
   return el;
 }
-function makeTaskBlock(a){
+// Applies side-by-side positioning for blocks that overlap other blocks on the same day.
+// Non-overlapping blocks (totalCols===1) keep the default full-width left:2px/right:2px from CSS.
+function applyOverlapPosition(el,layout){
+  if(!layout||layout.totalCols<=1)return;
+  const pct=100/layout.totalCols;
+  el.style.left=(layout.col*pct)+'%';
+  el.style.right='auto';
+  el.style.width='calc('+pct+'% - 3px)';
+}
+function makeTaskBlock(a,layout){
   const t=variableTasks.find(x=>x.id===a.taskId);
   if(!t)return null;
   const{top,h,ok}=clipBlock(a.startSlot,a.len);if(!ok)return null;
@@ -1458,30 +1544,56 @@ function makeTaskBlock(a){
   el.className='block task'+(isDone?' done':'')+(a.overdue?' overdue':'')+(a.phase==='study-late'?' overdue':'');
   el.style.top=top+'px';el.style.height=h+'px';
   el.style.background=t.color;el.style.color='#fff';el.draggable=true;
+  applyOverlapPosition(el,layout);
   const ph=blockPhaseLabel(a,t);
   // Exam blocks: line 1 = "Study for X", line 2 = "Deep Study: Chapter" etc.
   // Task blocks: line 1 = task name, line 2 = time range
   const line1 = (t.type==='exam') ? 'Study for '+t.name : t.name;
-  el.innerHTML=`<span class="bname">${line1}</span>`+(ph?`<span class="bphase">${ph}</span>`:`<span class="btime">${slotLabel(a.startSlot)}–${slotLabel(a.startSlot+a.len)}</span>`);
+  el.innerHTML=`<span class="bname">${line1}</span>`+(ph?`<span class="bphase">${ph}</span>`:`<span class="btime">${slotLabel(a.startSlot)}–${slotLabel(a.startSlot+a.len)}</span>`)+`<div class="resize-handle" title="Drag to extend this block"></div>`;
   el.title='Study for '+t.name+(ph?' — '+ph:'')+(isDone?' ✓':'');
   el.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',JSON.stringify({kind:'task',id:a.id,grabOffset:e.offsetY}));el.classList.add('dragging');});
   el.addEventListener('dragend',()=>el.classList.remove('dragging'));
   el.addEventListener('click',e=>{e.stopPropagation();openBlockSheet(a);});
+
+  // Resize handle: drag the bottom edge to extend (or shrink) the block's duration directly
+  // on the calendar. Uses plain mouse events (not HTML5 drag) so it doesn't conflict with
+  // the block's own drag-to-reposition behaviour above.
+  const handle=el.querySelector('.resize-handle');
+  handle.draggable=false;
+  handle.addEventListener('mousedown',ev=>{
+    ev.preventDefault();ev.stopPropagation();
+    const startY=ev.clientY, startLen=a.len;
+    let newLen=startLen;
+    function onMove(mv){
+      const deltaSlots=Math.round((mv.clientY-startY)/ROWH);
+      newLen=Math.max(1,Math.min(startLen+deltaSlots,SLOTS-a.startSlot));
+      el.style.height=(newLen*ROWH-2)+'px';
+    }
+    function onUp(){
+      document.removeEventListener('mousemove',onMove);
+      document.removeEventListener('mouseup',onUp);
+      if(newLen!==startLen){
+        a.len=newLen;
+        saveCurrentData();renderWeek();
+        showToast('Extended to '+(newLen*30)+' min');
+      }
+    }
+    document.addEventListener('mousemove',onMove);
+    document.addEventListener('mouseup',onUp);
+  });
   return el;
 }
-function countDone(a){let c=0;for(let i=a.startSlot;i<a.startSlot+a.len;i++){if(completedSlots.has(a.date+'|'+i))c++;}return c;}
+function countDone(a){let c=0;for(let i=0;i<a.len;i++){if(completedSlots.has(a.date+'|'+a.id+'|'+i))c++;}return c;}
 function handleDrop(pl,ds,col,e){
   const rect=col.getBoundingClientRect(),y=e.clientY-rect.top,grab=pl.grabOffset||0;
   if(pl.kind==='task'){
     const a=assignments.find(x=>x.id===pl.id);if(!a)return;
     let slot=viewStart+Math.round((y-grab)/ROWH);slot=Math.max(0,Math.min(SLOTS-a.len,slot));
-    const{fx,tx}=gridForDate(ds,assignments.filter(x=>x.id!==a.id));
-    let ok=true;for(let k=0;k<a.len;k++){if(!isFree(fx,tx,slot+k)){ok=false;break;}}
-    let fs2=ok?slot:-1;if(!ok){for(let i=0;i<=SLOTS-a.len;i++){let f=true;for(let k=0;k<a.len;k++){if(!isFree(fx,tx,i+k)){f=false;break;}}if(f){fs2=i;break;}}}
-    if(fs2===-1){showToast('No free space — try another spot.');return;}
-    a.date=ds;a.startSlot=fs2;
+    // Manual placement is allowed to overlap other blocks (like Outlook/Google Calendar) —
+    // overlapping blocks are rendered side-by-side rather than being blocked outright.
+    a.date=ds;a.startSlot=slot;
     const due=variableTasks.find(t=>t.id===a.taskId);a.overdue=due?(parseDate(ds)>parseDate(due.dueDate)):false;
-    renderWeek();showToast('Moved to '+fmtShort(parseDate(ds))+' at '+slotLabel(fs2));
+    saveCurrentData();renderWeek();showToast('Moved to '+fmtShort(parseDate(ds))+' at '+slotLabel(slot));
   }else if(pl.kind==='fixed'){
     const fs=fixedSchedules.find(x=>x.id===pl.id);if(!fs)return;
     const len=pl.len;
@@ -1529,20 +1641,45 @@ function openBlockSheet(a){
     </div>`;
 
   if(allDone){
-    body+=`<div style="background:var(--mint-soft);border-radius:12px;padding:14px;text-align:center;font-size:15px;font-weight:700;color:var(--mint);">✅ Session complete! Great work.</div>`;
+    const attempt = findQuizAttemptForAssignment(a);
+    body+=`<div style="background:var(--mint-soft);border-radius:12px;padding:14px;text-align:center;font-size:15px;font-weight:700;color:var(--mint);margin-bottom:10px;">✅ Session complete! Great work.</div>`;
+    if(attempt){
+      body+=`<button class="btn btn-ghost" id="bsViewQuiz">📊 View quiz results (${attempt.score}%)</button>`;
+    }
   } else if(isNow){
+    const durLabel = a.len*30<60 ? (a.len*30)+'-min' : (((a.len*30)/60)%1===0?((a.len*30)/60):((a.len*30)/60).toFixed(1))+'-hour';
     body+=`<div style="background:var(--sun-soft);border-radius:12px;padding:14px;margin-bottom:12px;text-align:center;">
       <div style="font-size:12px;font-weight:700;color:var(--ink-soft);margin-bottom:4px;">READY TO FOCUS?</div>
-      <div style="font-size:13px;color:var(--ink-soft);">A 30-min countdown will start. Stay on the focus screen to keep your ⭐ reward.</div>
+      <div style="font-size:13px;color:var(--ink-soft);">A ${durLabel} countdown will start. Stay on the focus screen to keep your ⭐ reward.</div>
     </div>
     <button class="btn btn-accent" id="bsStartFocus">🎯 Start focus session</button>`;
   } else if(isPast){
     body+=`<div style="background:var(--bg);border-radius:12px;padding:12px;font-size:13.5px;color:var(--ink-soft);margin-bottom:12px;">This block has already passed. Log it as done to catch up.</div>
     <button class="btn btn-accent" id="bsCatchUp">Log as done (catch up) ⭐</button>`;
   } else {
-    body+=`<div style="background:var(--bg);border-radius:12px;padding:14px;font-size:13.5px;color:var(--ink-soft);">
-      Come back during this time block to start your focus session. You can also drag it to a different time if that works better.
-    </div>`;
+    if(isExam){
+      const daysUntilExam = Math.max(0, Math.round((parseDate(t.dueDate)-startOfDay(now))/86400000));
+      const sessionNum = a.chapterSessionNum||1;
+      const sessionTotal = a.chapterSessionTotal||1;
+      const verb = a.phase==='revision-final' ? 'finalize your revision of'
+                 : a.phase==='revision'        ? 'revise'
+                 : 'master';
+      const daysLine = daysUntilExam<=0 ? 'Your exam is TODAY.'
+                      : daysUntilExam===1 ? 'Days before exam: 1 day.'
+                      : `Days before exam: ${daysUntilExam} days.`;
+      const sessionLine = sessionTotal<=1
+        ? `This is your <b>ONLY session</b> to ${verb} this chapter, make it count!`
+        : `This is your <b>${ordinal(sessionNum)} session out of ${sessionTotal}</b> to ${verb} this chapter, make it count!`;
+      const isCritical = daysUntilExam<=2;
+      body+=`<div style="background:${isCritical?'var(--coral-soft)':'var(--sun-soft)'};border-radius:12px;padding:14px;font-size:13.5px;color:${isCritical?'#8C2E20':'var(--ink-soft)'};line-height:1.5;">
+        <div style="font-weight:800;margin-bottom:5px;">${isCritical?'⏰':'📚'} ${daysLine}</div>
+        ${sessionLine}
+      </div>`;
+    } else {
+      body+=`<div style="background:var(--bg);border-radius:12px;padding:14px;font-size:13.5px;color:var(--ink-soft);">
+        Come back during this time block to start your focus session. You can also drag it to a different time if that works better.
+      </div>`;
+    }
   }
   body+=`${a.remarks?`<div style="background:var(--sun-soft);border-radius:10px;padding:10px 13px;font-size:12.5px;color:var(--ink-soft);margin-top:10px;"><b style="font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;">📝 Remarks</b><br>${a.remarks}</div>`:''}
   <div style="display:flex;gap:8px;margin-top:10px;">
@@ -1560,9 +1697,21 @@ function openBlockSheet(a){
   const cub=document.getElementById('bsCatchUp');
   if(cub)cub.onclick=()=>{closeModal();completeBlock(a,true);};
   const db=document.getElementById('bsDelete');
-  if(db)db.onclick=()=>{if(confirm('Delete "'+t.name+'" and all its scheduled blocks?')){
-    variableTasks=variableTasks.filter(x=>x.id!==t.id);assignments=assignments.filter(x=>x.taskId!==t.id);
-    closeModal();renderWeek();renderSheet();showToast('"'+t.name+'" deleted.');}};
+  if(db)db.onclick=()=>{ closeModal(); confirmDeleteTask(t.id); };
+  const vqb=document.getElementById('bsViewQuiz');
+  if(vqb)vqb.onclick=()=>{ closeModal(); const att=findQuizAttemptForAssignment(a); if(att) openQuizReviewModal(att); };
+}
+
+/** Finds the specific quiz attempt linked to this exact study block (a.quizAttemptId),
+ *  not just "any quiz for this chapter" — so results only show for blocks the student
+ *  actually completed a quiz for. */
+function findQuizAttemptForAssignment(a){
+  if(!a.quizAttemptId) return null;
+  const t = variableTasks.find(x=>x.id===a.taskId);
+  if(!t) return null;
+  const ch = examChaps(t)[a.sessionIndex];
+  if(!ch || !Array.isArray(ch.quizHistory)) return null;
+  return ch.quizHistory.find(qa=>qa.id===a.quizAttemptId) || null;
 }
 
 /* Edit a single calendar block: title, date, start time, duration, remarks */
@@ -1591,14 +1740,8 @@ function openEditBlockModal(a){
     const newLen=newDur/30;
     const newSlot=timeToSlot(newStart);
     if(newSlot+newLen>SLOTS){showToast('That start time + duration runs past midnight.');return;}
-    // Check the target space is free (excluding this block itself)
-    const{fx,tx}=gridForDate(newDate,assignments.filter(x=>x.id!==a.id));
-    for(let k=0;k<newLen;k++){
-      if(!isFree(fx,tx,newSlot+k)){
-        showToast('That time overlaps '+((fx[newSlot+k]&&fx[newSlot+k].name)||'another task')+' — pick a different slot.');
-        return;
-      }
-    }
+    // Manual edits are allowed to overlap other blocks (like drag-and-drop and quick-add) —
+    // overlapping blocks render side-by-side on the calendar rather than being blocked.
     if(newTitle)t.name=newTitle;
     a.date=newDate;a.startSlot=newSlot;a.len=newLen;
     a.remarks=document.getElementById('ebRemarks').value.trim();
@@ -1627,11 +1770,14 @@ function openFixedDetail(fs,slot,len){
    FOCUS MODE OVERLAY ENGINE
    ============================================= */
 let focusAssignment=null;
+let focusDurationSecs=30*60; // set per-session to match the actual block length (a.len × 30 min)
 let focusSecs=30*60;
 let focusComplete=false; // true once timer hits 0 — only then is reward earnable
 
 function startFocusMode(a,t,ph){
-  focusAssignment=a;focusSecs=30*60;focusComplete=false;
+  focusAssignment=a;
+  focusDurationSecs=Math.max(1,a.len||1)*30*60; // e.g. a 1-hour block (len=2) → 3600s, not always 30 min
+  focusSecs=focusDurationSecs;focusComplete=false;
   document.getElementById('foTaskName').textContent=t.name;
   document.getElementById('foPhase').textContent=ph||('Session · '+slotLabel(a.startSlot)+'–'+slotLabel(a.startSlot+a.len));
   document.getElementById('foWarn').classList.remove('show');
@@ -1667,7 +1813,7 @@ function onFocusBlur(){
   // only penalise if the timer is still running (not yet complete)
   if(!focusComplete&&document.getElementById('focusOverlay').classList.contains('active')){
     clearInterval(timerInterval);
-    focusSecs=30*60; // restart
+    focusSecs=focusDurationSecs; // restart at the full block duration, not a hardcoded 30 min
     updateFoTimer();
     document.getElementById('foWarn').classList.add('show');
     // restart after 1s delay so the warning is readable
@@ -1685,7 +1831,7 @@ function exitFocusMode(){
   document.getElementById('foTimer').style.color='';
   document.removeEventListener('visibilitychange',onFocusBlur);
   window.removeEventListener('blur',onFocusBlur);
-  focusAssignment=null;focusSecs=30*60;focusComplete=false;
+  focusAssignment=null;focusSecs=focusDurationSecs;focusComplete=false;
 }
 
 document.getElementById('foComplete').onclick=()=>{
@@ -1707,9 +1853,12 @@ document.getElementById('foFF').onclick=()=>{
    COMPLETE BLOCK + CONFIDENCE FLOW
    ============================================= */
 function completeBlock(a,catchUp=false){
-  // Mark one 30-min slot as done
-  for(let i=a.startSlot;i<a.startSlot+a.len;i++){
-    const k=a.date+'|'+i;
+  // Mark one 30-min sub-unit of THIS assignment as done — keyed by assignment id
+  // (not raw calendar slot) so completion can never leak onto a different block
+  // that happens to share the same date+time (drag-to-any-time + overlapping blocks
+  // both make that collision possible).
+  for(let i=0;i<a.len;i++){
+    const k=a.date+'|'+a.id+'|'+i;
     if(!completedSlots.has(k)){completedSlots.add(k);break;}
   }
   awardSticker('common','30 mins of focus! 🎉');
@@ -1727,11 +1876,12 @@ function completeBlock(a,catchUp=false){
    ============================================= */
 function renderSheet(){
   const body=document.getElementById('sheetBody');
-  const titles={tasks:'Variable Tasks',schedule:'Fixed Schedule',notes:'Checklists & Notes',me:'My Profile'};
+  const titles={tasks:'Variable Tasks',schedule:'Fixed Schedule',notes:'Checklists & Notes',quiz:'Quiz History',me:'My Profile'};
   document.getElementById('sheetTitle').textContent=titles[currentTab]||'';
   if(currentTab==='tasks')renderTasksSheet(body);
   else if(currentTab==='schedule')renderScheduleSheet(body);
   else if(currentTab==='notes')renderNotesSheet(body);
+  else if(currentTab==='quiz')renderQuizHistorySheet(body);
   else if(currentTab==='me')renderProfileSheet(body);
 }
 
@@ -1771,105 +1921,147 @@ function renderTasksSheet(body){
     </div>`;
   }
 
+  const todayStr = dateKey(new Date());
+  const activeTasks  = variableTasks.filter(t=>t.dueDate>=todayStr);
+  const overdueTasks = variableTasks.filter(t=>t.dueDate<todayStr);
+
   if(!variableTasks.length){
     html+=`<div style="text-align:center;padding:48px 20px;color:var(--ink-faint);font-size:14px;">
       No tasks yet. Click <b>+ Add task</b> to get started.
     </div>`;
+  } else if(!activeTasks.length){
+    html+=`<div style="text-align:center;padding:32px 20px;color:var(--ink-faint);font-size:14px;">
+      No upcoming tasks. ${overdueTasks.length?'Check the overdue section below.':'Click <b>+ Add task</b> to get started.'}
+    </div>`;
   } else {
-    html+=`<div style="overflow-x:auto;">
-    <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
-      <thead>
-        <tr style="border-bottom:2px solid var(--line);">
-          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Task / Revision</th>
-          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Type</th>
-          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Due / Exam date</th>
-          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Duration</th>
-          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);">Chapters</th>
-          <th style="padding:9px 8px;"></th>
-        </tr>
-      </thead>
-      <tbody>`;
+    html+=buildTasksTable(activeTasks, false);
+  }
 
-    variableTasks.forEach(t=>{
-      const isExam = t.type==='exam';
-      const chaps  = isExam ? examChaps(t) : [];
-      const totalMin = isExam
-        ? chaps.reduce((s,c)=>s+(Number(c.durationMin)||0), 0)
-        : (Number(t.durationMin)||60);
-      const totalH   = (totalMin/60).toFixed(1);
-
-      // Chapters column — numbered list, each on its own line
-      const pdfCache=window._pdfCache||{};
-      const pdfList=(isExam&&Array.isArray(t.pdfFiles)&&t.pdfFiles.length)
-        ? `<div style="margin-top:8px;padding-top:7px;border-top:1px dashed var(--line);">
-            <div style="font-size:10.5px;font-weight:700;color:var(--lav);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px;">📎 Uploaded notes</div>
-            ${t.pdfFiles.map(p=>{
-              const cached=!!pdfCache[t.id+'|'+p.name];
-              const kb=p.size?Math.round(p.size/1024)+' KB':'';
-              return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
-                <span style="font-size:12px;">📄</span>
-                <span style="font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</span>
-                <span style="font-size:10.5px;color:var(--ink-faint);white-space:nowrap;">${kb}</span>
-                ${cached
-                  ?`<button style="border:1px solid var(--lav);background:var(--lav-soft);color:var(--lav);border-radius:6px;padding:2px 9px;font-size:11px;font-weight:700;cursor:pointer;" data-viewpdf="${t.id}|${p.name.replace(/"/g,'&quot;')}">View</button>`
-                  :`<span style="font-size:10px;color:var(--ink-faint);" title="PDF bytes aren't stored between sessions — re-upload in Edit to view again">re-upload to view</span>`}
-              </div>`;
-            }).join('')}
-          </div>`
-        : '';
-      const chapCell = isExam && chaps.length
-        ? `<div style="display:flex;flex-direction:column;gap:3px;">
-            ${chaps.map((c,i)=>`
-              <div style="display:flex;align-items:baseline;gap:6px;">
-                <span style="font-size:11px;color:var(--ink-faint);flex-shrink:0;">${i+1}.</span>
-                <span style="font-size:12.5px;line-height:1.3;">${c.name||'Chapter '+(i+1)}</span>
-                <span style="font-size:11px;color:var(--ink-faint);white-space:nowrap;margin-left:auto;padding-left:8px;">${c.durationMin||60}min</span>
-              </div>`).join('')}
-           </div>${pdfList}`
-        : `<span style="color:var(--ink-faint);font-size:12.5px;">—</span>`;
-
-      html+=`
-        <tr style="border-bottom:1px solid var(--line);" onmouseover="this.style.background='#FAFBFD'" onmouseout="this.style.background=''">
-          <td style="padding:11px 12px;">
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span style="width:10px;height:10px;border-radius:50%;background:${t.color};flex-shrink:0;display:inline-block;"></span>
-              <span style="font-weight:700;">${t.name}</span>
-            </div>
-          </td>
-          <td style="padding:11px 12px;white-space:nowrap;">
-            <span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:700;
-              background:${isExam?'var(--coral-soft)':'var(--lav-soft)'};
-              color:${isExam?'#B8402F':'#473A6B'};">
-              ${isExam?'Exam / Test':'Task / HW'}
-            </span>
-          </td>
-          <td style="padding:11px 12px;white-space:nowrap;font-size:13px;">${t.dueDate}</td>
-          <td style="padding:11px 12px;white-space:nowrap;">
-            <div style="font-weight:700;">${totalMin} min</div>
-            <div style="font-size:11.5px;color:var(--ink-soft);">${totalH}h total${(!isExam&&t.startTime&&t.endTime)?` · ${t.startTime}–${t.endTime}`:''}</div>
-          </td>
-          <td style="padding:11px 12px;min-width:220px;">${chapCell}</td>
-          <td style="padding:11px 8px;white-space:nowrap;">
-            <div style="display:flex;gap:6px;">
-              <button style="border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;" data-edit="${t.id}">Edit</button>
-              <button style="border:1px solid var(--coral-soft);background:var(--coral-soft);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;color:var(--coral);cursor:pointer;" data-del="${t.id}">Delete</button>
-            </div>
-          </td>
-        </tr>`;
-    });
-
-    html+=`</tbody></table></div>`;
+  if(overdueTasks.length){
+    html+=`
+    <div style="margin-top:28px;padding-top:16px;border-top:2px dashed var(--line);">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <span style="font-size:14px;font-weight:700;color:var(--coral);">⏰ Overdue (${overdueTasks.length})</span>
+        <span style="font-size:11.5px;color:var(--ink-faint);">past their due/exam date — clean these up or reschedule</span>
+      </div>
+      ${buildTasksTable(overdueTasks, true)}
+    </div>`;
   }
 
   body.innerHTML=html;
   body.querySelector('#genSchBtn').onclick=()=>{runScheduler();saveCurrentData();refreshTasksView();showToast('Schedule regenerated!');};
   body.querySelector('#addTaskBtn').onclick=()=>openEditTaskModal(null);
-  body.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
-    if(!confirm('Delete "'+( variableTasks.find(x=>x.id===b.dataset.del)?.name||'this task')+'"?')) return;
-    variableTasks=variableTasks.filter(x=>x.id!==b.dataset.del);
-    assignments=assignments.filter(x=>x.taskId!==b.dataset.del);
-    saveCurrentData(); runScheduler(); refreshTasksView(); renderWeek();
+  wireTasksTableEvents(body);
+}
+
+// Builds the HTML table for a list of tasks. `overdue` toggles strikethrough/muted styling.
+function buildTasksTable(taskList, overdue){
+  let html=`<div style="overflow-x:auto;">
+  <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
+    <thead>
+      <tr style="border-bottom:2px solid var(--line);">
+        <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Task / Revision</th>
+        <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Type</th>
+        <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Due / Exam date</th>
+        <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Duration</th>
+        <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);">Chapters</th>
+        <th style="padding:9px 8px;"></th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  taskList.forEach(t=>{
+    const isExam = t.type==='exam';
+    const chaps  = isExam ? examChaps(t) : [];
+    const totalMin = isExam
+      ? chaps.reduce((s,c)=>s+(Number(c.durationMin)||0), 0)
+      : (Number(t.durationMin)||60);
+    const totalH   = (totalMin/60).toFixed(1);
+
+    const pdfCache=window._pdfCache||{};
+    const chapCell = isExam && chaps.length
+      ? `<div style="display:flex;flex-direction:column;gap:3px;">
+          ${chaps.map((c,i)=>{
+            const cacheKey = c._sourceFile ? (t.id+'|'+c._sourceFile) : null;
+            const hasCachedPdf = cacheKey && !!pdfCache[cacheKey];
+            const pdfIcon = c._sourceFile
+              ? (hasCachedPdf
+                  ? `<button data-viewpdf="${cacheKey.replace(/"/g,'&quot;')}" title="Open source PDF: ${c._sourceFile}"
+                       style="border:none;background:none;padding:0 2px;cursor:pointer;font-size:12px;line-height:1;flex-shrink:0;">📄</button>`
+                  : `<span title="Source PDF not cached this session — re-upload in Edit to view again" style="font-size:12px;opacity:.3;flex-shrink:0;">📄</span>`)
+              : '';
+            return `
+            <div style="display:flex;align-items:baseline;gap:5px;">
+              <span style="font-size:11px;color:var(--ink-faint);flex-shrink:0;">${i+1}.</span>
+              ${pdfIcon}
+              <span style="font-size:12.5px;line-height:1.3;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${c.name||'Chapter '+(i+1)}</span>
+              <span style="font-size:11px;color:var(--ink-faint);white-space:nowrap;margin-left:auto;padding-left:8px;">${c.durationMin||60}min</span>
+            </div>`;}).join('')}
+         </div>`
+      : `<span style="color:var(--ink-faint);font-size:12.5px;">—</span>`;
+
+    html+=`
+      <tr style="border-bottom:1px solid var(--line);${overdue?'opacity:.65;':''}" onmouseover="this.style.background='#FAFBFD'" onmouseout="this.style.background=''">
+        <td style="padding:11px 12px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="width:10px;height:10px;border-radius:50%;background:${t.color};flex-shrink:0;display:inline-block;${overdue?'opacity:.5;':''}"></span>
+            <span style="font-weight:700;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${t.name}</span>
+          </div>
+        </td>
+        <td style="padding:11px 12px;white-space:nowrap;">
+          <span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:700;
+            background:${isExam?'var(--coral-soft)':'var(--lav-soft)'};
+            color:${isExam?'#B8402F':'#473A6B'};">
+            ${isExam?'Exam / Test':'Task / HW'}
+          </span>
+        </td>
+        <td style="padding:11px 12px;white-space:nowrap;font-size:13px;${overdue?'color:var(--coral);font-weight:600;':''}">${t.dueDate}</td>
+        <td style="padding:11px 12px;white-space:nowrap;">
+          <div style="font-weight:700;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${totalMin} min</div>
+          <div style="font-size:11.5px;color:var(--ink-soft);">${totalH}h total${(!isExam&&t.startTime&&t.endTime)?` · ${t.startTime}–${t.endTime}`:''}</div>
+        </td>
+        <td style="padding:11px 12px;min-width:220px;">${chapCell}</td>
+        <td style="padding:11px 8px;white-space:nowrap;">
+          <div style="display:flex;gap:6px;">
+            ${overdue?'':`<button style="border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;" data-edit="${t.id}">Edit</button>`}
+            <button style="border:1px solid var(--coral-soft);background:var(--coral-soft);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;color:var(--coral);cursor:pointer;" data-del="${t.id}">Delete</button>
+          </div>
+        </td>
+      </tr>`;
   });
+
+  html+=`</tbody></table></div>`;
+  return html;
+}
+
+// Custom in-app delete confirmation (native window.confirm() can be unreliable/blocked
+// depending on how the page is embedded, which was silently swallowing delete clicks).
+function confirmDeleteTask(taskId){
+  const t = variableTasks.find(x=>x.id===taskId);
+  if(!t) return;
+  openModal(`
+    <h3 style="margin-bottom:6px;">Delete this task?</h3>
+    <div style="font-size:13.5px;color:var(--ink-soft);margin-bottom:16px;">
+      "<b>${t.name}</b>" and all its scheduled study blocks will be removed from your calendar. This can't be undone.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-accent" id="confirmDelBtn" style="background:var(--coral);">Delete task</button>
+      <button class="btn btn-ghost" id="mClose">Cancel</button>
+    </div>`);
+  document.getElementById('confirmDelBtn').onclick=()=>{
+    variableTasks = variableTasks.filter(x=>x.id!==taskId);
+    assignments = assignments.filter(x=>x.taskId!==taskId);
+    closeModal();
+    runScheduler();      // rebuilds assignments from the (now shorter) variableTasks list — clears the deleted task's calendar blocks
+    saveCurrentData();   // persist both the shorter task list and the rebuilt schedule
+    refreshTasksView();
+    renderWeek();
+    showToast('"'+t.name+'" deleted.');
+  };
+}
+
+function wireTasksTableEvents(body){
+  body.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>confirmDeleteTask(b.dataset.del));
   body.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditTaskModal(variableTasks.find(t=>t.id===b.dataset.edit)));
   body.querySelectorAll('[data-viewpdf]').forEach(b=>b.onclick=()=>viewPdf(b.dataset.viewpdf));
 }
@@ -1887,19 +2079,104 @@ function viewPdf(cacheKey){
     setTimeout(()=>URL.revokeObjectURL(url),60000);
   }catch(e){showToast('Could not open PDF: '+e.message);}
 }
+function refreshScheduleView(){
+  if(typeof isDesktop==='function' && isDesktop()){
+    const activeTab=document.querySelector('.dtb-tab[data-dtab="schedule"]');
+    if(activeTab && activeTab.classList.contains('active')){
+      const body=document.getElementById('desktopContentBody');
+      if(body){ renderScheduleSheet(body); return; }
+    }
+  }
+  if(currentTab==='schedule') renderSheet();
+}
+function occurrenceLabel(days){
+  if(days.length===7) return 'Every day';
+  const wd=[0,1,2,3,4], we=[5,6];
+  if(days.length===5 && wd.every(d=>days.includes(d))) return 'Every weekday';
+  if(days.length===2 && we.every(d=>days.includes(d))) return 'Weekends';
+  return days.slice().sort().map(d=>DAY_NAMES[d]).join(', ');
+}
 function renderScheduleSheet(body){
-  let html='';
-  fixedSchedules.forEach(fs=>{
-    const days=fs.days.map(d=>DAY_NAMES[d]).join(', ');
-    html+=`<div class="fs-card"><div class="fs-dot${fixedIsGrey(fs.name)?'':' blue'}"></div><div class="fs-body"><div class="fs-name">${fs.name}</div><div class="fs-meta">${days} · ${fs.start}–${fs.end}</div></div>
-      <button class="fs-edit" data-fsed="${fs.id}">Edit</button></div>`;
-  });
-  html+=`<button class="add-btn" id="addFSBtn">+ Add fixed schedule</button>`;
-  html+=`<div style="margin-top:12px;"><button class="btn btn-primary" id="saveSchBtn">Save & re-schedule</button></div>`;
+  let html=`
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+    <div style="font-size:16px;font-weight:700;font-family:'Fraunces',serif;">Fixed Schedule</div>
+    <div style="display:flex;gap:8px;">
+      <button style="border:none;background:var(--coral);color:#fff;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;" id="addFSBtn">+ Add schedule</button>
+    </div>
+  </div>`;
+
+  if(!fixedSchedules.length){
+    html+=`<div style="text-align:center;padding:48px 20px;color:var(--ink-faint);font-size:14px;">
+      No fixed schedule yet. Click <b>+ Add schedule</b> for things like school, sleep, or tuition.
+    </div>`;
+  } else {
+    html+=`<div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--line);">
+          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Task</th>
+          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Occurrence</th>
+          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Time</th>
+          <th style="text-align:left;padding:9px 12px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Duration</th>
+          <th style="padding:9px 8px;"></th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+    // Sort by first occurring day, then start time, for a predictable read order
+    const sorted=[...fixedSchedules].sort((a,b)=>{
+      const da=Math.min(...a.days), db=Math.min(...b.days);
+      return da-db || a.start.localeCompare(b.start);
+    });
+
+    sorted.forEach(fs=>{
+      const s=timeToSlot(fs.start), e=timeToSlot(fs.end);
+      const durMin=((e>s?e-s:(SLOTS-s)+e))*30;
+      const durLabel=durMin<60?durMin+' min':(durMin/60)+'h'+(durMin%60?(durMin%60)+'m':'');
+      html+=`
+        <tr style="border-bottom:1px solid var(--line);" onmouseover="this.style.background='#FAFBFD'" onmouseout="this.style.background=''">
+          <td style="padding:11px 12px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="width:10px;height:10px;border-radius:50%;background:var(--grey);flex-shrink:0;display:inline-block;"></span>
+              <span style="font-weight:700;">${fs.name}</span>
+            </div>
+          </td>
+          <td style="padding:11px 12px;white-space:nowrap;font-size:13px;">${occurrenceLabel(fs.days)}</td>
+          <td style="padding:11px 12px;white-space:nowrap;font-variant-numeric:tabular-nums;">${fs.start} – ${fs.end}</td>
+          <td style="padding:11px 12px;white-space:nowrap;color:var(--ink-soft);">${durLabel}</td>
+          <td style="padding:11px 8px;white-space:nowrap;">
+            <div style="display:flex;gap:6px;">
+              <button style="border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;" data-fsed="${fs.id}">Edit</button>
+              <button style="border:1px solid var(--coral-soft);background:var(--coral-soft);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;color:var(--coral);cursor:pointer;" data-fsdel="${fs.id}">Delete</button>
+            </div>
+          </td>
+        </tr>`;
+    });
+    html+=`</tbody></table></div>
+    <div style="margin-top:14px;"><button class="btn btn-primary" id="saveSchBtn" style="width:auto;padding:9px 18px;">Save &amp; re-schedule</button></div>`;
+  }
+
   body.innerHTML=html;
   body.querySelectorAll('[data-fsed]').forEach(b=>b.onclick=()=>openEditFSModal(fixedSchedules.find(x=>x.id===b.dataset.fsed)));
-  body.querySelector('#addFSBtn').onclick=()=>openEditFSModal(null);
-  body.querySelector('#saveSchBtn').onclick=()=>{runScheduler();showToast('Saved & re-scheduled!');};
+  body.querySelectorAll('[data-fsdel]').forEach(b=>b.onclick=()=>{
+    const fsId=b.dataset.fsdel;
+    const name=fixedSchedules.find(x=>x.id===fsId)?.name||'this schedule';
+    openModal(`
+      <h3 style="margin-bottom:6px;">Delete this schedule?</h3>
+      <div style="font-size:13.5px;color:var(--ink-soft);margin-bottom:16px;">"<b>${name}</b>" will be removed from your fixed schedule.</div>
+      <div class="modal-actions">
+        <button class="btn btn-accent" id="confirmFsDelBtn" style="background:var(--coral);">Delete</button>
+        <button class="btn btn-ghost" id="mClose">Cancel</button>
+      </div>`);
+    document.getElementById('confirmFsDelBtn').onclick=()=>{
+      fixedSchedules=fixedSchedules.filter(x=>x.id!==fsId);
+      closeModal();
+      saveCurrentData();refreshScheduleView();renderWeek();
+      showToast('"'+name+'" deleted.');
+    };
+  });
+  const addBtn=body.querySelector('#addFSBtn'); if(addBtn) addBtn.onclick=()=>openEditFSModal(null);
+  const saveBtn=body.querySelector('#saveSchBtn'); if(saveBtn) saveBtn.onclick=()=>{runScheduler();saveCurrentData();showToast('Saved & re-scheduled!');};
 }
 function renderNotesSheet(body){
   const today=dateKey(new Date());
@@ -1943,6 +2220,251 @@ function renderNotesSheet(body){
   const wi=body.querySelector('#addWeeklyInp');if(wi)wi.addEventListener('keydown',e=>{if(e.key==='Enter')addCheck('addWeeklyInp',weeklyChecklist);});
   const ta=body.querySelector('#notesTA');if(ta)ta.addEventListener('input',()=>{ud.notes=ta.value;});
 }
+/* =============================================
+   QUIZ HISTORY TAB — practice quizzes (any syllabus chapter, on demand)
+   plus a full chronological history of every attempt, reviewable anytime.
+   ============================================= */
+
+// Gathers every quiz attempt the student has ever taken — both ad-hoc practice
+// quizzes and quizzes tied to real scheduled study blocks — into one flat,
+// chronological list. Each entry carries `ref` = the ACTUAL stored attempt object
+// (not a copy), so opening it for review and editing notes persists correctly.
+function getAllQuizAttempts(){
+  const list=[];
+  Object.values(practiceQuizHistory).forEach(attempts=>{
+    attempts.forEach(att=>list.push({ref:att, source:'practice', label:att.subjectLabel||'Practice', chapterName:att.itemName||'Chapter', date:att.date, score:att.score}));
+  });
+  variableTasks.forEach(t=>{
+    if(t.type!=='exam') return;
+    examChaps(t).forEach(ch=>{
+      (ch.quizHistory||[]).forEach(att=>list.push({ref:att, source:'scheduled', label:t.name, chapterName:ch.name, date:att.date, score:att.score}));
+    });
+  });
+  list.sort((a,b)=> new Date(b.date) - new Date(a.date));
+  return list;
+}
+
+function renderQuizHistorySheet(body){
+  let html = `<div style="font-size:16px;font-weight:700;font-family:'Fraunces',serif;margin-bottom:4px;">Quiz History</div>
+  <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:18px;">Practice any syllabus chapter on demand, and review every quiz you've ever taken.</div>`;
+
+  // ── Practice Quizzes — every chapter from every loaded syllabus (filtered to the
+  //    student's configured level), generate on demand, grouped by Topic ──
+  const levelSubjects = syllabusForCurrentLevel();
+  const levelLabel = STUDENT_LEVELS.find(l=>l.key===studentLevel)?.label;
+  html += `<div class="section-title">📚 Practice Quizzes${levelLabel?` <span style="font-weight:500;color:var(--ink-faint);text-transform:none;">(${levelLabel})</span>`:''}</div>`;
+  if(!levelSubjects.length){
+    html += `<div style="font-size:12.5px;color:var(--ink-faint);margin-bottom:16px;">No syllabus subjects for your level yet. <button id="qhLevelHint" style="border:none;background:none;color:var(--lav);font-weight:700;text-decoration:underline;cursor:pointer;padding:0;">Change level in Settings →</button></div>`;
+  } else {
+    if(!studentLevel){
+      html += `<div style="font-size:11.5px;color:var(--ink-soft);background:var(--sun-soft);border-radius:8px;padding:8px 12px;margin-bottom:12px;">Showing all subjects — <button id="qhLevelHint" style="border:none;background:none;color:var(--lav);font-weight:700;text-decoration:underline;cursor:pointer;padding:0;font-size:11.5px;">set your level in Settings</button> to narrow this down.</div>`;
+    }
+    levelSubjects.forEach(([key,entry])=>{
+      const items = flattenSyllabusToPickerItems(entry);
+      // Group items by their parent Topic, same structure as the chapter picker
+      const topics = [];
+      items.forEach(it=>{
+        let g = topics.find(g=>g.topicIndex===it.topicIndex);
+        if(!g){ g={topicIndex:it.topicIndex, topicName:it.topicName, items:[]}; topics.push(g); }
+        g.items.push(it);
+      });
+      html += `<div style="margin-bottom:20px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:10px;">${entry.label} <span style="font-weight:500;color:var(--ink-faint);font-size:11.5px;">(${items.length} chapters)</span></div>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          ${topics.map(g=>`
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:6px;">${g.topicName}</div>
+              <div style="display:flex;flex-direction:column;gap:6px;padding-left:2px;">
+                ${g.items.map(it=>{
+                  const histKey = key+'::'+it.id;
+                  const attempts = practiceQuizHistory[histKey]||[];
+                  const latest = attempts[attempts.length-1];
+                  return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--bg);border-radius:9px;">
+                    <span style="flex:1;font-size:12.5px;line-height:1.3;">${it.name}</span>
+                    ${latest?`<span style="font-size:11px;font-weight:700;color:${pctToColour(latest.score)};white-space:nowrap;">${latest.score}%</span>`:''}
+                    <button data-take-quiz="${histKey.replace(/"/g,'&quot;')}" style="border:1px solid var(--lav);background:#fff;color:var(--lav);border-radius:7px;padding:5px 12px;font-size:11.5px;font-weight:700;cursor:pointer;white-space:nowrap;">${attempts.length?'Retake':'Take Quiz'}</button>
+                  </div>`;
+                }).join('')}
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>`;
+    });
+  }
+
+  // ── My Quiz History — every attempt, chronological, click to review ──
+  const allAttempts = getAllQuizAttempts();
+  html += `<div class="section-title">📊 My Quiz History</div>`;
+  if(!allAttempts.length){
+    html += `<div style="text-align:center;padding:32px 20px;color:var(--ink-faint);font-size:13.5px;">No quizzes taken yet — try a practice quiz above, or finish a scheduled study block.</div>`;
+  } else {
+    html += `<div style="display:flex;flex-direction:column;gap:6px;">
+      ${allAttempts.map((entry,i)=>{
+        const dateLabel = new Date(entry.date).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'});
+        return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg);border-radius:9px;cursor:pointer;" data-review-attempt="${i}">
+          <span style="width:8px;height:8px;border-radius:50%;background:${entry.source==='practice'?'var(--lav)':'var(--coral)'};flex-shrink:0;" title="${entry.source==='practice'?'Practice quiz':'Scheduled study block'}"></span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:12.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${entry.chapterName}</div>
+            <div style="font-size:11px;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${entry.label} · ${dateLabel}</div>
+          </div>
+          <span style="font-size:13px;font-weight:800;color:${pctToColour(entry.score)};flex-shrink:0;">${entry.score}%</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  body.innerHTML = html;
+
+  body.querySelectorAll('[data-take-quiz]').forEach(btn=>{
+    btn.onclick=()=>{
+      const [subjKey, itemId] = btn.dataset.takeQuiz.split('::');
+      const entry = SYLLABUS_LIBRARY[subjKey];
+      const items = flattenSyllabusToPickerItems(entry);
+      const item = items.find(it=>it.id===itemId);
+      if(item) openPracticeQuizModal(subjKey, entry, item);
+    };
+  });
+  body.querySelectorAll('[data-review-attempt]').forEach(btn=>{
+    btn.onclick=()=>{
+      const entry = allAttempts[Number(btn.dataset.reviewAttempt)];
+      if(entry) openQuizReviewModal(entry.ref);
+    };
+  });
+  const qhlh = body.querySelector('#qhLevelHint');
+  if(qhlh) qhlh.onclick = ()=>openSettingsModal();
+}
+
+/** Generates and runs a standalone practice quiz for any syllabus chapter — no
+ *  calendar/scheduling side effects, just a self-contained quiz + score + save. */
+async function openPracticeQuizModal(subjectKey, entry, item){
+  if(!getApiKey()){ showToast('Add an AI API key in Settings (⚙️) to generate quizzes.'); return; }
+
+  const _wide =()=>{ const b=document.getElementById('modalBox'); if(b){b.style.maxWidth='640px';b.style.width='95vw';} };
+  const _reset=()=>{ const b=document.getElementById('modalBox'); if(b){b.style.maxWidth='';b.style.width='';} };
+
+  openModal(`
+    <div style="text-align:center;padding:36px 16px;">
+      <div style="font-size:40px;margin-bottom:14px;">🧠</div>
+      <h3 style="margin-bottom:8px;">Generating quiz…</h3>
+      <div style="font-size:13.5px;color:var(--ink-soft);">${item.name}</div>
+      <div style="font-size:12px;color:var(--ink-faint);margin-top:14px;">Takes about 8–10 seconds</div>
+    </div>`);
+  _wide();
+
+  const pseudoChapter = {name:item.name, text:item.text, keyTopics:item.keyTopics};
+  let questions;
+  try{
+    questions = await AIService.generateQuiz(pseudoChapter, 10);
+  }catch(err){
+    _reset();
+    openModal(`<h3>Couldn't generate quiz</h3><div class="sub">${describeAiError(err)}</div>
+      <div class="modal-actions"><button class="btn btn-ghost" id="mClose">Close</button></div>`);
+    return;
+  }
+
+  const userAnswers = new Array(questions.length).fill(-1);
+
+  function buildQuestions(){
+    return questions.map((q,qi)=>{
+      const opts=q.opts.map((opt,oi)=>{
+        const cls='quiz-opt'+(userAnswers[qi]===oi?' selected':'');
+        return `<div class="${cls}" data-qi="${qi}" data-oi="${oi}">
+          <span class="quiz-opt-letter">${'ABCD'[oi]}</span>
+          <span style="flex:1;line-height:1.4;">${opt}</span>
+        </div>`;
+      }).join('');
+      return `<div class="quiz-question" id="pqq${qi}">
+        <div class="quiz-q-num">Question ${qi+1} / ${questions.length}</div>
+        <div class="quiz-q-text">${q.q}</div>
+        <div class="quiz-opts">${opts}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderQuizView(){
+    const box=document.getElementById('modalBox');
+    box.innerHTML=`
+      <div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line);">
+        <div style="font-size:15px;font-weight:800;">Practice Quiz — ${item.name}</div>
+        <div style="font-size:12px;color:var(--ink-soft);">${questions.length} questions · ${entry.label}</div>
+      </div>
+      <div style="max-height:58vh;overflow-y:auto;padding-right:2px;">${buildQuestions()}</div>
+      <div class="modal-actions" style="margin-top:14px;">
+        <button class="btn btn-accent" id="pqSubmit">Submit answers</button>
+        <button class="btn btn-ghost" id="mClose">Cancel</button>
+      </div>`;
+    _wide();
+
+    box.querySelectorAll('.quiz-opt[data-qi]').forEach(el=>{
+      el.addEventListener('click',()=>{
+        const qi=Number(el.dataset.qi), oi=Number(el.dataset.oi);
+        userAnswers[qi]=oi;
+        const qEl=document.getElementById('pqq'+qi);
+        if(qEl){
+          qEl.classList.remove('quiz-unanswered');
+          qEl.querySelectorAll('.quiz-opt').forEach((o,i)=>o.className='quiz-opt'+(i===oi?' selected':''));
+        }
+      });
+    });
+
+    document.getElementById('pqSubmit').onclick=async()=>{
+      const missing=userAnswers.map((v,i)=>v===-1?i:-1).filter(i=>i!==-1);
+      if(missing.length){
+        missing.forEach(qi=>{ const el=document.getElementById('pqq'+qi); if(el){el.classList.add('quiz-unanswered'); el.scrollIntoView({behavior:'smooth',block:'center'});} });
+        showToast(`${missing.length} question${missing.length!==1?'s':''} still unanswered`);
+        return;
+      }
+      await renderPracticeResultsView();
+    };
+  }
+
+  async function renderPracticeResultsView(){
+    const correct=questions.filter((q,i)=>userAnswers[i]===q.ans).length;
+    const total=questions.length;
+    const pct=Math.round(correct/total*100);
+
+    const box=document.getElementById('modalBox');
+    box.innerHTML=`<div style="text-align:center;padding:30px 16px;">
+      <div style="font-size:40px;margin-bottom:10px;">⏳</div>
+      <div style="font-size:14px;color:var(--ink-soft);">Grading…</div>
+    </div>`;
+
+    let grade={score:pct, confidence:pctToStars(pct), weakTopics:[]};
+    try{ grade = await AIService.gradeQuiz(pseudoChapter, questions, userAnswers); }catch(_){}
+
+    const attemptId=uid();
+    const attempt={
+      id:attemptId, date:new Date().toISOString(),
+      itemName:item.name, subjectLabel:entry.label,
+      score:grade.score, confidence:grade.confidence, weakTopics:grade.weakTopics||[],
+      questions, userAnswers, notes:'',
+    };
+    const histKey = subjectKey+'::'+item.id;
+    if(!Array.isArray(practiceQuizHistory[histKey])) practiceQuizHistory[histKey]=[];
+    practiceQuizHistory[histKey].push(attempt);
+    saveCurrentData();
+
+    _reset();
+    openQuizReviewModal(attempt);
+    // Refresh whichever quiz-tab view is showing so the new score/attempt appears immediately
+    refreshQuizHistoryView();
+    showToast(`${grade.score}% — saved to your Quiz History!`);
+  }
+
+  renderQuizView();
+}
+
+function refreshQuizHistoryView(){
+  if(typeof isDesktop==='function' && isDesktop()){
+    const activeTab=document.querySelector('.dtb-tab[data-dtab="quiz"]');
+    if(activeTab && activeTab.classList.contains('active')){
+      const body=document.getElementById('desktopContentBody');
+      if(body){ renderQuizHistorySheet(body); return; }
+    }
+  }
+  if(currentTab==='quiz') renderSheet();
+}
+
 function renderProfileSheet(body){
   const total=totalStickerCount(),wk=thisWeekStickers();
   let streak=0,d=new Date(startOfDay(new Date()));
@@ -2081,14 +2603,11 @@ function openAddTask(ds,slot){
     const col=document.getElementById('qtColor').value;
     const len=Math.max(1,Math.ceil((timeToMin(enV)-timeToMin(stV))/30));
     const dMin=len*30;
-    adjSlot=Math.max(timeToSlot(stV),ds===todayK?nowS+NOW_BUF:0);
-    const{fx,tx}=gridForDate(ds,assignments);
-    let fs=adjSlot;let ok=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,fs+k)){ok=false;break;}}
-    if(!ok){for(let i=adjSlot;i<=SLOTS-len;i++){let f=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,i+k)){f=false;break;}}if(f){fs=i;break;}}}
+    const fs=Math.max(0,Math.min(SLOTS-len,Math.max(timeToSlot(stV),ds===todayK?nowS+NOW_BUF:0))); // placed directly — overlap with other blocks is allowed
     const t={id:uid(),name,type:'task',dueDate:ds,durationMin:dMin,startTime:stV,endTime:enV,sessions:1,priority:variableTasks.length+1,color:col};
     variableTasks.push(t);
     assignments.push({id:uid(),taskId:t.id,date:ds,startSlot:fs,len,sessionIndex:0,phase:'task',overdue:false});
-    closeModal();renderWeek();renderSheet();showToast('"'+name+'" added at '+slotLabel(fs));
+    saveCurrentData();closeModal();renderWeek();renderSheet();showToast('"'+name+'" added at '+slotLabel(fs));
   };
 }
 /* ═══════════════════════════════════════════════════════════════════════
@@ -2129,6 +2648,396 @@ function saveGeminiKey(k){ localStorage.setItem('stackle_gemini_key', k.trim());
 // — always reflect whichever provider is currently selected.
 function getApiKey(){ return getAiProvider()==='gemini' ? getGeminiKey() : getClaudeKey(); }
 function saveApiKey(k){ if(getAiProvider()==='gemini') saveGeminiKey(k); else saveClaudeKey(k); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SYLLABUS LIBRARY — pre-built chapter data for standard MOE/SEAB syllabuses.
+   Loading from here costs ZERO AI tokens and is instant — no PDF upload,
+   no waiting, no per-student cost. This is curated ONCE (by whoever
+   maintains Stackle) from the official public syllabus documents, then
+   reused by every student studying that subject+level combination.
+   Extend this object with more subjects/levels over time; each entry
+   follows the same shape AIService.processPDF() produces, so everything
+   downstream (scheduling, quizzes, grading) works identically either way.
+   ═══════════════════════════════════════════════════════════════════════ */
+const SYLLABUS_LIBRARY = {
+  'olevel-geography-2236': {
+    label: 'O-Level Geography (2236)',
+    subject: 'Geography',
+    level: 'O-Level (Sec 3/4)',
+    levels: ['sec3','sec4-5'],
+    source: 'https://www.seab.gov.sg/docs/default-source/national-examinations/syllabus/olevel/2021syllabus/2236_y21_sy.pdf',
+    aiSummary: 'O-Level Pure Geography (2236): three themes — physical geography (coasts, tectonics, weather/climate), human geography (tourism, food resources, health/diseases), and geographical skills (map reading, data techniques, fieldwork investigations).',
+    chapters: [
+      { name:'Topic 1: Coasts — Should coastal environments matter?', durationMin:120, difficulty:3, sessions:2,
+        keyTopics:['wave processes & erosion/deposition landforms','coral reef & mangrove ecosystems','sustainable coastal management'],
+        text:'Coastal environments are dynamic, shaped by waves, currents, tides, geology and human activity. Waves form from wind energy transfer; wave type (constructive vs destructive) depends on fetch, wind speed/duration. Erosional processes (abrasion, hydraulic action, attrition, solution) create cliffs, headlands, caves, arches, stacks. Depositional processes (longshore drift) create beaches, spits, tombolos. Coral reefs and mangroves support fisheries, tourism, coastal protection but face pressures from over-collection, development, climate change. Sustainable management uses soft engineering (beach nourishment, vegetation) and hard engineering (seawalls, groynes, breakwaters).' },
+      { name:'Topic 2: Living with Tectonic Hazards — Risk or opportunity?', durationMin:120, difficulty:4, sessions:2,
+        keyTopics:['plate boundaries & Earth structure','volcano formation & landforms','earthquake/tsunami preparedness'],
+        text:'Earth has a layered structure (core, mantle, continental/oceanic crust). Tectonic plates move via slab-pull and convection currents, creating divergent, convergent and transform boundaries. Plate movement produces rift valleys, fold mountains, volcanoes, earthquakes, tsunamis. Volcanoes vary by lava viscosity (shield vs stratovolcano); living near them carries benefits (fertile soil, minerals, geothermal energy, tourism) and risks (destruction, pollution). Earthquake/tsunami response involves preparedness (land-use regulation, warning systems), short-term response (search & rescue) and long-term rebuilding.' },
+      { name:'Topic 3: Variable Weather and Changing Climate — A continuing challenge?', durationMin:150, difficulty:4, sessions:3,
+        keyTopics:['temperature & rainfall formation','climate change causes & greenhouse effect','tropical cyclones'],
+        text:'Weather elements (temperature, humidity, pressure/winds) vary by latitude, altitude, distance from sea, cloud cover. Rain forms via convectional or relief processes; monsoon winds and land/sea breezes explained by pressure differences. Equatorial, monsoon and cool temperate climates have distinct patterns; Singapore has an equatorial climate. Climate change since 1880 driven by natural causes (solar variation, volcanic eruptions) and anthropogenic causes (deforestation, agriculture, industry, urbanisation) enhancing the greenhouse effect — causing sea level rise, extreme weather, disease spread. International (Kyoto Protocol) and national responses exist. Tropical cyclones form 8-15° from Equator over warm water (>26.5°C), bringing storm surges, strong winds; mitigated via prediction, land-use control, resilient infrastructure.' },
+      { name:'Topic 4: Global Tourism — Is tourism the way to go?', durationMin:90, difficulty:2, sessions:1,
+        keyTopics:['types of tourism & attractions','growth drivers of global tourism','economic/socio-cultural/environmental impacts'],
+        text:'Tourism types include honeypot (scenic), MICE/medical (facilities), heritage/film-induced/pilgrimage/dark (culture). Government, media and international organisations promote tourism. Growth driven by technology (transport, e-booking), demand factors (income, leisure time) and destination factors (attractions, infrastructure). Tourism fluctuates due to disasters, recessions, political unrest, disease outbreaks. Impacts: economic (jobs, income vs seasonal unemployment), socio-cultural (heritage preservation vs dilution, crime), environmental (conservation vs vandalism, pollution, habitat loss). Sustainable tourism relies on regulation and community-based approaches.' },
+      { name:'Topic 5: Food Resources — Is technology a panacea for food shortage?', durationMin:120, difficulty:3, sessions:2,
+        keyTopics:['food consumption patterns (DC vs LDC)','factors affecting food production intensity','strategies to address food shortage'],
+        text:'Food consumption varies between developed (DCs) and less-developed countries (LDCs) — DCs show more excess consumption (obesity), LDCs more inadequate consumption (malnutrition, starvation), each with distinct health/economic/social impacts. Food production intensity affected by physical factors (relief, soil, climate), economic factors (commercial vs subsistence, agri-business), political factors, and technology (Green Revolution: high-yield varieties, irrigation, fertilisers). Food shortage caused by physical (extreme weather), political (civil strife) and economic factors. Solutions include technological (biotechnology/GM food, storage), agricultural (crop rotation, conservation), social and political/economic strategies (food aid, agricultural policy).' },
+      { name:'Topic 6: Health and Diseases — Are we more vulnerable than before?', durationMin:120, difficulty:4, sessions:2,
+        keyTopics:['health variation between DCs/LDCs','malaria & HIV/AIDS transmission and spread','disease management strategies'],
+        text:'Health varies between DCs and LDCs by infant mortality rate, life expectancy — driven by social (diet, education), economic (poverty, healthcare investment) and environmental (sanitation, water access) factors. DCs face more degenerative diseases (heart disease, cancer); LDCs face more infectious diseases (malaria, HIV/AIDS, tuberculosis). Malaria spreads via mosquito-human-mosquito transmission, worsened by poor sanitation, limited healthcare, stagnant water. HIV/AIDS spreads via sexual contact, infected needles/blood, mother-to-child, worsened by education gaps, stigma, mobility. Management involves individual/community/government/international action — prevention (thermal fogging, border controls), treatment access, and mandatory reporting.' },
+      { name:'Topic 7: Topographical Map Reading Skills', durationMin:60, difficulty:2, sessions:1,
+        keyTopics:['grid references & direction','scale & symbol interpretation','relief & human activity from maps'],
+        text:'Candidates must read 4- and 6-figure grid references, compass direction and bearings from grid north. Interpretation skills cover scale (representative fraction, linear, statement), map symbols, relief features, and identifying human activity from map evidence. This is a skills-based topic tested across both exam papers rather than a standalone content section.' },
+      { name:'Topic 8: Geographical Data and Techniques', durationMin:60, difficulty:2, sessions:1,
+        keyTopics:['map/photo/graph data types','constructing & completing data presentations','statistical calculations (%, ratios, mean)'],
+        text:'Students interpret data from maps (choropleth, isoline, dot, proportional symbol), photographs (aerial, satellite), and graphs (line, bar, pie, scatter with best-fit). They must construct/complete presentations using these methods and perform statistical calculations (percentages, ratios, mean) to show patterns and changes. Also covers describing landscapes from photographs and producing annotated sketch maps.' },
+      { name:'Topic 9: Geographical Investigations', durationMin:90, difficulty:3, sessions:2,
+        keyTopics:['fieldwork inquiry process','data collection methods (observation, measurement, questionnaire, interview)','forming conclusions from data'],
+        text:'Fieldwork follows an inquiry approach: formulate aims/hypotheses/guiding questions, collect data (observation, measurement, questionnaires, interviews — each with methodology considerations like sampling and question design), analyse data for patterns/trends, present data with appropriate illustrations, and form evidence-based conclusions while evaluating data collection reliability. This topic is only examined in Section A of Paper 1, tied to Coasts and Global Tourism.' },
+    ],
+  },
+  // Add more subject+level entries here over time, e.g.:
+  'sec2-geography': {
+    label: 'Sec 2 Geography (Lower Sec, TQ2: Sustainable Cities)',
+    subject: 'Geography',
+    level: 'Secondary 2',
+    levels: ['sec2'],
+    source: 'Official MOE Lower Secondary Geography Syllabus (G2/G3, implementation from 2021 Sec 1 cohort) — user-provided PDF, verified',
+    aiSummary: 'Sec 2 Geography covers Thematic Question 2: "How Can We Sustainably Build Cities?" — the characteristics and growth of cities, then two topics in depth: Housing and Transport Systems. Each guiding question from the official syllabus is its own selectable study chapter.',
+    chapters: [
+      { name:'TQ2 Overview: How Can We Sustainably Build Cities?', durationMin:90, difficulty:2, sessions:1,
+        keyTopics:['characteristics of cities & rural-urban migration','opportunities & challenges of urban growth','strategies for sustainable city-building'],
+        guidingQuestions: [
+          { question:'GQ1 — What are cities?', durationMin:30, difficulty:2,
+            outcomes:['Describe the characteristics of cities','Describe how cities are related to rural areas'],
+            content:'Cities are defined by a large population size, high population density, an extensive built-up area, and a range of functions such as administrative and commercial activity. Cities relate to rural areas in two main ways: through rural-urban migration (driven by push factors that drive people away from rural areas and pull factors that attract them to cities), and by providing goods and services (e.g. food, hospitals) that rural areas rely on.',
+            terms:['City','Population size','Population density','Infrastructure','Function','Rural-urban migration','Push factor','Pull factor','Amenities'] },
+          { question:'GQ2 — How do cities impact the environment and the people living in them as they continue to grow?', durationMin:30, difficulty:2,
+            outcomes:['Describe the ways cities impact people and the environment'],
+            content:'Urban growth creates opportunities: better access to education and employment, and technological innovation that can reduce carbon emissions and improve mobility. It also creates challenges: increased environmental pollution (water, air) and greater competition for natural resources such as land and water.',
+            terms:['Education','Employment','Industries','Technological innovations','Environmental pollution','Environmental footprint','Competition'] },
+          { question:'GQ3 — How can people sustainably build cities?', durationMin:30, difficulty:2,
+            outcomes:['Describe the strategies used to sustainably build cities'],
+            content:'Sustainable city-building has two thrusts. Environmental management addresses the physical environment directly (reducing water/air pollution) and manages hazards (using better-quality building materials, land-use planning to reduce risk). Improving quality of life means providing safe housing, a variety of transport options, and designing for the needs of different groups such as the elderly and persons with disabilities.',
+            terms:['Management','Hazard','Human-induced','Natural','Quality of life','Housing','Transportation mode'] },
+        ] },
+      { name:'Topic 2.1: Housing', durationMin:150, difficulty:3, sessions:3,
+        keyTopics:['formal vs informal housing characteristics & location','factors affecting housing location','sustainable housing management strategies'],
+        guidingQuestions: [
+          { question:'GQ1 — What are the different types of housing and where are they found in cities?', durationMin:60, difficulty:3,
+            outcomes:['Describe the different types of housing and their characteristics','Compare the different types of housing and their characteristics','Describe the distribution of housing locations within cities'],
+            content:'Formal housing is built by the government or private developers, comes with a legal right to occupy the land, access to basic services, and is made of high-quality building materials — it tends to be located on desirable land, away from pollution and heavy industry. Informal housing (squatter settlements) is self-built, has no legal right to occupy the land, and lacks access to basic services — it tends to be found on "locally unwanted land-use" (LULU) sites, such as near landfills or sewage treatment plants.',
+            terms:['Formal housing','Government','Private developers','Legal right','Basic services','Informal housing','Squatters','Squatter settlements','Desirable land','Locally unwanted land-use'] },
+          { question:'GQ2 — Why are different types of housing located where they are in cities?', durationMin:30, difficulty:3,
+            outcomes:['Explain the factors affecting the locations of formal and informal housing in cities'],
+            content:'Where housing ends up is shaped by land-use planning (restrictive zoning), which kind of developer is involved (government vs private), the price of land, and the availability of housing financial support such as finance schemes for lower-income buyers or improved developer financing access.',
+            terms:['Land-use planning','Housing shortage','Government','Private developers','Financial support','Finance schemes','Affordability','Cost'] },
+          { question:'GQ3 — What is the relationship between housing and (i) the environment and (ii) people?', durationMin:30, difficulty:3,
+            outcomes:['Describe the impact that housing has on the environment','Describe the impact that housing has on people'],
+            content:'Housing draws on natural resources (forests, water) in its construction and can generate environmental pollution (land, water). For people, housing meets basic needs like shelter and sanitation, provides access to nearby amenities (shops, clinics), and fosters community — interactions with neighbours and a sense of belonging.',
+            terms:['Natural resources','Pollution','Waste','Basic needs','Amenities','Social','Communities'] },
+          { question:'GQ4 — How can these relationships be sustainably managed?', durationMin:30, difficulty:3,
+            outcomes:['Explain the strategies taken to sustainably manage housing in Singapore and other countries','Evaluate these strategies'],
+            content:'Sustainable housing management includes integrated land-use planning by urban development authorities, providing inclusive public housing, designing environmental features into buildings (e.g. zero-energy building design), and improving slum conditions through government funding.',
+            terms:['Management','Short-/long-term','Integrated land-use planning','Inclusive public housing','Slums'] },
+        ] },
+      { name:'Topic 2.2: Transport Systems', durationMin:150, difficulty:3, sessions:3,
+        keyTopics:['transport network density, infrastructure quality & modes','reasons transport systems exist in cities','sustainable transport management strategies'],
+        guidingQuestions: [
+          { question:'GQ1 — What are transport systems and where are they found in the cities?', durationMin:60, difficulty:3,
+            outcomes:['Describe the characteristics of transport systems in cities','Describe the locations of transport nodes in cities'],
+            content:'Transport systems in cities are characterised by the density of the transport network (how many nodes and routes exist), the quality of transport infrastructure (e.g. paved roads, how well facilities are maintained), and the variety of transport modes available (e.g. rail, air). Transport nodes tend to be located where activities are concentrated and where accessibility is high.',
+            terms:['Transport','Transport system','Network','Location','Node','Route','Infrastructure','Mode','Accessibility','Terminal'] },
+          { question:'GQ2 — Why are transport systems located in cities?', durationMin:30, difficulty:2,
+            outcomes:['Explain the reasons for a transport system in cities'],
+            content:'Transport systems exist to move people, goods and services; they provide intermodal connectivity (linking different transport modes together) and connectivity between cities.',
+            terms:['Intermodal','Connectivity'] },
+          { question:'GQ3 — What relationships do transport systems in cities have with (i) the environment and (ii) people?', durationMin:30, difficulty:3,
+            outcomes:['Describe the impacts of transport systems on the environment','Describe the impacts of transport systems on people'],
+            content:'Building and running transport systems changes the physical environment — clearing natural vegetation, modifying landforms — and increases carbon footprint. For people, transport systems bring health and safety risks and traffic congestion, but also improve mobility for groups such as the elderly and persons with disabilities.',
+            terms:['Physical environment','Carbon footprint','Health risk','Safety risk','Traffic congestion','Mobility'] },
+          { question:'GQ4 — How can these relationships be sustainably managed?', durationMin:30, difficulty:3,
+            outcomes:['Explain the strategies taken to sustainably manage transport systems in Singapore and other countries','Evaluate these strategies'],
+            content:'Sustainable transport management includes laws and policies (e.g. road safety rules), integrated land-use and transport planning (e.g. terminals designed as multi-purpose hubs), providing mobility options for different groups (e.g. wheelchair-friendly buses), and research & development (e.g. navigation and location-based mobile apps).',
+            terms:['Management','Short-/long-term','Land-use planning','Transport planning','Mobility research and development'] },
+        ] },
+    ],
+  },
+  'sec1-geography': {
+    label: 'Sec 1 Geography (Lower Sec, TQ1: Sustainable Resources)',
+    subject: 'Geography',
+    level: 'Secondary 1',
+    levels: ['sec1'],
+    source: 'Official MOE Lower Secondary Geography Syllabus (G2/G3, implementation from 2021 Sec 1 cohort) — user-provided PDF, verified',
+    aiSummary: 'Sec 1 Geography covers Thematic Question 1: "How Can We Sustainably Manage Natural Resources?" — natural resources in general, then two topics in depth: Water, and Tropical Rainforests & Mangroves. Each guiding question from the official syllabus is its own selectable study chapter.',
+    chapters: [
+      { name:'TQ1 Overview: How Can We Sustainably Manage Natural Resources?', durationMin:60, difficulty:2, sessions:2,
+        keyTopics:['renewable vs non-renewable resources','nature-centred vs human-centred views','sustainable use (4Rs, technology)'],
+        guidingQuestions: [
+          { question:'GQ1 — What are natural resources?', durationMin:30, difficulty:2,
+            outcomes:['Describe the types of natural resources'],
+            content:'Natural resources are classed as renewable (able to regenerate naturally over time) or non-renewable (finite, do not regenerate on a human timescale).',
+            terms:['Natural resource','Renewable','Non-renewable'] },
+          { question:'GQ2 — How do people view and use natural resources?', durationMin:30, difficulty:2,
+            outcomes:['Describe the ways people view and use natural resources'],
+            content:'A nature-centred view treats the physical environment as valuable in itself, which favours preservation. A human-centred view treats the environment as valuable for what can be extracted from it, which can lead to over-extraction, resource depletion, and environmental degradation. Sustainable use aims to keep resources available for future generations through conservation practices — such as the 4Rs (reduce, reuse, recycle, recover) — and technology that reduces environmental footprint (e.g. low-flush toilets, solar farms).',
+            terms:['Value','Nature-centred','Preservation','Human-centred','Extraction','Depletion','Environmental degradation','Sustainable use','Conservation','Short-/long-term','Consumption','Waste','Technology','Environmental footprint'] },
+        ] },
+      { name:'Topic 1.1: Water', durationMin:120, difficulty:3, sessions:4,
+        keyTopics:['water stores & the hydrological cycle','water budget (surplus/deficit)','relationships with environment/people & sustainable management'],
+        guidingQuestions: [
+          { question:'GQ1 — What is water and where is water found?', durationMin:30, difficulty:2,
+            outcomes:['Identify the physical states of water','Describe the distribution of various water stores'],
+            content:'Water exists in three physical states — gaseous (water vapour), liquid, and solid (ice). It is held in stores including oceans, glaciers, rivers, lakes, groundwater and soil, and these stores are unevenly distributed across the world.',
+            terms:['Physical state','Gaseous','Liquid','Solid','Store','Distribution','Ocean','Glacier','River','River source','River mouth','Lake','Freshwater','Groundwater','Soil','Soil moisture','Pore','Bedrock'] },
+          { question:'GQ2 — Why is water available on Earth?', durationMin:30, difficulty:3,
+            outcomes:['Explain how the hydrological cycle ensures a continuous supply of water','Explain water budget'],
+            content:'The hydrological cycle keeps water continuously supplied through evaporation, transpiration, condensation, precipitation, infiltration, percolation, surface runoff and groundwater flow. Within a catchment area, the water budget compares inputs and outputs of water, which can result in either a surplus or a deficit.',
+            terms:['Hydrological cycle','Process','Evaporation','Transpiration','Condensation','Precipitation','Infiltration','Percolation','Surface runoff','Groundwater flow','Water budget','Catchment','Storage','Input','Output','Surplus','Deficit','Net change'] },
+          { question:'GQ3 — What relationships does water have with (i) the environment and (ii) people?', durationMin:30, difficulty:3,
+            outcomes:['Describe how the availability of water changes due to variations in precipitation','Describe how water supports river ecosystems','Describe how water is used by people','Explain how human actions have led to water pollution and its associated impact'],
+            content:'Excess rainfall causes floods, while a prolonged lack of rainfall causes droughts — both affect river ecosystems. People use water domestically (washing, cooking), recreationally (water sports, fishing), agriculturally (wet rice cultivation, livestock rearing) and industrially (e.g. hydropower). Pollution of water stores threatens aquatic ecosystems and reduces the water available for people to use.',
+            terms:['Rainfall','Supply','Flood','Drought','Ecosystem','Domestic','Recreation','Agriculture','Industry','Pollution','Quality','Threat'] },
+          { question:'GQ4 — How can these relationships be sustainably managed?', durationMin:30, difficulty:3,
+            outcomes:['Explain the strategies taken to sustainably manage water resources in Singapore and other countries','Evaluate these strategies'],
+            content:'Countries manage water sustainably by improving water quality (e.g. anti-pollution laws), reducing water consumption (e.g. conservation efforts), improving water technology (e.g. desalination), and importing water through international agreements.',
+            terms:['Management','Short-/long-term','Quality','Consumption','Technology','Import'] },
+        ] },
+      { name:'Topic 1.2: Tropical Rainforests and Mangroves', durationMin:120, difficulty:3, sessions:4,
+        keyTopics:['characteristics, distribution & adaptations','environmental functions & human uses','deforestation impact & sustainable management'],
+        guidingQuestions: [
+          { question:'GQ1 — What are tropical rainforests and mangroves and where are they found?', durationMin:30, difficulty:2,
+            outcomes:['Describe the characteristics of tropical rainforests and mangroves','Describe the distribution of tropical rainforests and mangroves'],
+            content:'Both are evergreen with high plant diversity. Tropical rainforests have distinct vertical layers (emergent, canopy, undergrowth); mangroves show horizontal zonation. Rainforests are found in the tropics; mangroves are found along sheltered coasts and river mouths.',
+            terms:['Natural vegetation','Tropical rainforest','Mangrove','Evergreen','Diversity','Structure','Layer','Emergent','Canopy','Undergrowth','Zonation','Distribution','Tropical climate','Latitude','Longitude','Equator','Tropic of Cancer','Tropic of Capricorn','Coast','River mouth'] },
+          { question:'GQ2 — Why are tropical rainforests and mangroves located in the tropics?', durationMin:30, difficulty:3,
+            outcomes:['Describe the conditions for the growth of tropical rainforests and mangroves','Explain the adaptations of tropical rainforests and mangroves','Compare the adaptations between tropical rainforests and mangroves'],
+            content:'Rainforests need high annual rainfall and high mean annual temperature to grow. Mangroves need warm, sheltered water. Rainforest plants adapt with broad, waxy, drip-tip leaves (to shed heavy rain) and buttress roots (for support in shallow soil). Mangrove plants adapt with salt-secreting leaves and specialised roots — pencil, cone, prop, and knee-bend roots — that exclude salt and help the plant breathe in waterlogged, low-oxygen soil.',
+            terms:['Annual rainfall','Mean annual temperature','Sheltered environment','Sediments','Salinity','Adaptation','Broad leaf','Waxy leaf','Drip-tip leaf','Buttress root','Salt-secreting','Aerial root','Pencil root','Cone root','Prop root','Knee-bend root','Salt-excluding'] },
+          { question:'GQ3 — What relationships do tropical rainforests and mangroves have with (i) the environment and (ii) people?', durationMin:30, difficulty:3,
+            outcomes:['Describe the environmental functions of tropical rainforests and mangroves','Describe how tropical rainforests and mangroves are used by people','Explain the impact of extracting resources from them on the physical environment'],
+            content:'Both ecosystems provide habitat for biodiversity, store carbon, generate oxygen through photosynthesis, and protect against soil and coastal erosion. People use them as places of habitation (e.g. longhouses, stilt houses), sources of raw materials (wood, minerals), places for recreation (trekking, camping), and sources of food (hunting, gathering, aquaculture). Extracting resources from them causes deforestation, which contributes to an enhanced greenhouse effect.',
+            terms:['Habitat','Biodiversity','Carbon storage','Oxygen generation','Photosynthesis','Erosion','Habitation','Raw material','Recreation','Extraction','Deforestation','Greenhouse gases','Enhanced greenhouse effect'] },
+          { question:'GQ4 — How can these relationships be sustainably managed?', durationMin:30, difficulty:3,
+            outcomes:['Explain the strategies taken to sustainably manage tropical rainforests and mangroves','Evaluate these strategies'],
+            content:'Management strategies include protecting areas that contain these ecosystems (national parks, biosphere reserves), regulating forestry activity (controlled logging), rehabilitating disturbed areas (reforestation), and promoting public education (e.g. guided nature walks).',
+            terms:['Management','Short-/long-term','Conservation','National park','Biosphere reserve','Forestry','Controlled logging','Reforestation','Public education'] },
+        ] },
+    ],
+  },
+  // Add more subject+level entries here over time, e.g.:
+  // 'sec2-math': { label:'Sec 2 Mathematics', subject:'Mathematics', level:'Secondary 2', chapters:[...] },
+};
+
+// Builds a rich, fully-structured study text from a chapter's guidingQuestions array —
+// preserves the Guiding Question / Learning Outcomes / Content / Main Terms structure
+// from the official syllabus tables, rather than collapsing it into one condensed
+// paragraph. This is what gets sent to the AI for quiz generation, so each guiding
+// question's content and terms are explicitly available for testing.
+function buildTextFromGQs(guidingQuestions){
+  if(!Array.isArray(guidingQuestions)||!guidingQuestions.length) return '';
+  return guidingQuestions.map(gq=>
+    `${gq.question}\n`+
+    `Learning outcomes: ${(gq.outcomes||[]).join('; ')}\n`+
+    `Content: ${gq.content||''}\n`+
+    `Key terms: ${(gq.terms||[]).join(', ')}`
+  ).join('\n\n');
+}
+
+/**
+ * Flattens a syllabus entry into a list of selectable "picker items" — one per
+ * guiding question (matching the official syllabus table structure), grouped
+ * under their parent Topic for display. Falls back to one item per Topic for
+ * entries that don't have guidingQuestions (e.g. future non-GQ subjects).
+ * Returns: [{ id, topicName, topicIndex, gqIndex, name, durationMin, difficulty, keyTopics, text }]
+ */
+const STUDENT_LEVELS = [
+  {key:'sec1',  label:'Secondary 1'},
+  {key:'sec2',  label:'Secondary 2'},
+  {key:'sec3',  label:'Secondary 3'},
+  {key:'sec4-5',label:'Secondary 4/5'},
+];
+
+/** Returns [key, entry] pairs from SYLLABUS_LIBRARY matching the student's configured
+ *  level. If no level is set yet (studentLevel===''), everything is shown — so users who
+ *  haven't visited Settings yet don't lose access to subjects. */
+function syllabusForCurrentLevel(){
+  const all = Object.entries(SYLLABUS_LIBRARY);
+  if(!studentLevel) return all;
+  return all.filter(([key,entry]) => !entry.levels || entry.levels.includes(studentLevel));
+}
+
+function flattenSyllabusToPickerItems(entry){
+  const items=[];
+  entry.chapters.forEach((topic,ti)=>{
+    if(Array.isArray(topic.guidingQuestions) && topic.guidingQuestions.length){
+      topic.guidingQuestions.forEach((gq,gi)=>{
+        items.push({
+          id: ti+'-'+gi,
+          topicName: topic.name,
+          topicIndex: ti,
+          name: gq.question,
+          durationMin: gq.durationMin || Math.round((topic.durationMin||60)/topic.guidingQuestions.length/30)*30 || 30,
+          difficulty: gq.difficulty || topic.difficulty || 3,
+          keyTopics: gq.terms || [],
+          text: `${gq.question}\nLearning outcomes: ${(gq.outcomes||[]).join('; ')}\nContent: ${gq.content||''}\nKey terms: ${(gq.terms||[]).join(', ')}`,
+        });
+      });
+    } else {
+      items.push({
+        id: ti+'-0', topicName: topic.name, topicIndex: ti, name: topic.name,
+        durationMin: topic.durationMin||60, difficulty: topic.difficulty||3,
+        keyTopics: topic.keyTopics||[], text: topic.text||'',
+      });
+    }
+  });
+  return items;
+}
+
+/**
+ * Loads selected guiding-question chapters from the library into a task.
+ * `selectedIds` is a Set/array of picker-item ids (see flattenSyllabusToPickerItems);
+ * if omitted, everything is loaded (used by internal/legacy callers).
+ */
+function loadFromSyllabusLibrary(key, task, selectedIds){
+  const entry = SYLLABUS_LIBRARY[key];
+  if(!entry) return false;
+  const items = flattenSyllabusToPickerItems(entry);
+  const wanted = selectedIds ? new Set(selectedIds) : null;
+  const chosen = wanted ? items.filter(it=>wanted.has(it.id)) : items;
+  if(!chosen.length) return false;
+
+  const newChapters = chosen.map(it=>({
+    name: it.name, durationMin: it.durationMin, difficulty: it.difficulty,
+    sessions: Math.max(1, Math.round(it.durationMin/60)) || 1,
+    keyTopics: it.keyTopics, text: it.text,
+    confidence: 0, quizHistory: [], hasPdfContent: true,
+    _sourceFile: 'Syllabus Library: '+entry.label+' — '+it.topicName,
+  }));
+
+  // Append, don't overwrite — consistent with how PDF uploads add to existing chapters
+  task.chapters = Array.isArray(task.chapters) ? [...task.chapters, ...newChapters] : newChapters;
+  return true;
+}
+
+/** Picker modal: student selects exactly which guiding questions (chapters) to add from a syllabus subject. */
+function renderSyllabusChapterPicker(hostEl, key, t, isNew){
+  const entry = SYLLABUS_LIBRARY[key];
+  if(!entry){ hostEl.innerHTML=''; return; }
+  const items = flattenSyllabusToPickerItems(entry);
+  const selected = new Set(items.map(it=>it.id)); // all selected by default
+
+  const topics = [];
+  items.forEach(it=>{
+    let g = topics.find(g=>g.topicIndex===it.topicIndex);
+    if(!g){ g={topicIndex:it.topicIndex, topicName:it.topicName, items:[]}; topics.push(g); }
+    g.items.push(it);
+  });
+
+  function renderList(){
+    const totalMin = items.filter(it=>selected.has(it.id)).reduce((s,it)=>s+it.durationMin,0);
+    return `
+      <div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <span id="pickerSummary" style="font-size:12px;color:var(--ink-soft);"><b>${selected.size}</b> of ${items.length} chapters selected \u00b7 ${(totalMin/60).toFixed(1)}h total</span>
+          <div style="display:flex;gap:6px;">
+            <button type="button" id="pickAllBtn" style="border:1px solid var(--line);background:#fff;border-radius:7px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;">All</button>
+            <button type="button" id="pickNoneBtn" style="border:1px solid var(--line);background:#fff;border-radius:7px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;">None</button>
+          </div>
+        </div>
+        <div id="pickerScrollArea" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;">
+          ${topics.map(g=>{
+            const allChecked = g.items.every(it=>selected.has(it.id));
+            return `
+            <div>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;color:var(--ink);margin-bottom:5px;cursor:pointer;">
+                <input type="checkbox" data-topic-toggle="${g.topicIndex}" ${allChecked?'checked':''} style="width:14px;height:14px;">
+                ${g.topicName}
+              </label>
+              <div style="display:flex;flex-direction:column;gap:4px;padding-left:20px;">
+                ${g.items.map(it=>`
+                  <label data-item-row="${it.id}" style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--ink-soft);cursor:pointer;padding:5px 7px;border-radius:7px;background:${selected.has(it.id)?'var(--lav-soft)':'var(--bg)'};">
+                    <input type="checkbox" data-item-id="${it.id}" ${selected.has(it.id)?'checked':''} style="width:13px;height:13px;margin-top:2px;flex-shrink:0;">
+                    <span style="flex:1;line-height:1.35;">${it.name}</span>
+                    <span style="font-size:10px;color:var(--ink-faint);white-space:nowrap;flex-shrink:0;">${it.durationMin}min</span>
+                  </label>`).join('')}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <button type="button" class="btn btn-mint" id="pickerAddBtn" style="margin-top:12px;font-size:13px;padding:9px;">Add selected chapters</button>
+      </div>`;
+  }
+
+  // Rebuild the list but keep the scroll position exactly where it was \u2014 used only for
+  // bulk actions (topic toggle, All/None) that touch multiple rows at once.
+  function rerenderPreservingScroll(){
+    const scrollArea = hostEl.querySelector('#pickerScrollArea');
+    const savedScroll = scrollArea ? scrollArea.scrollTop : 0;
+    hostEl.innerHTML = renderList();
+    bindPicker();
+    const newScrollArea = hostEl.querySelector('#pickerScrollArea');
+    if(newScrollArea) newScrollArea.scrollTop = savedScroll;
+  }
+
+  function updateSummary(){
+    const totalMin = items.filter(it=>selected.has(it.id)).reduce((s,it)=>s+it.durationMin,0);
+    const el = hostEl.querySelector('#pickerSummary');
+    if(el) el.innerHTML = `<b>${selected.size}</b> of ${items.length} chapters selected \u00b7 ${(totalMin/60).toFixed(1)}h total`;
+  }
+
+  function bindPicker(){
+    // Individual chapter checkbox \u2014 update in place, never rebuild the list, so the
+    // scroll position can't jump. This is the common case (picking chapters one by one).
+    hostEl.querySelectorAll('[data-item-id]').forEach(cb=>{
+      cb.onchange=()=>{
+        const id = cb.dataset.itemId;
+        if(cb.checked) selected.add(id); else selected.delete(id);
+        const row = hostEl.querySelector(`[data-item-row="${id}"]`);
+        if(row) row.style.background = cb.checked ? 'var(--lav-soft)' : 'var(--bg)';
+        const item = items.find(it=>it.id===id);
+        if(item){
+          const topicCb = hostEl.querySelector(`[data-topic-toggle="${item.topicIndex}"]`);
+          if(topicCb){
+            const groupItems = items.filter(it=>it.topicIndex===item.topicIndex);
+            topicCb.checked = groupItems.every(it=>selected.has(it.id));
+          }
+        }
+        updateSummary();
+      };
+    });
+    hostEl.querySelectorAll('[data-topic-toggle]').forEach(cb=>{
+      cb.onchange=()=>{
+        const ti=Number(cb.dataset.topicToggle);
+        const groupItems=items.filter(it=>it.topicIndex===ti);
+        if(cb.checked) groupItems.forEach(it=>selected.add(it.id));
+        else groupItems.forEach(it=>selected.delete(it.id));
+        rerenderPreservingScroll();
+      };
+    });
+    const allBtn=hostEl.querySelector('#pickAllBtn');
+    if(allBtn) allBtn.onclick=()=>{ items.forEach(it=>selected.add(it.id)); rerenderPreservingScroll(); };
+    const noneBtn=hostEl.querySelector('#pickNoneBtn');
+    if(noneBtn) noneBtn.onclick=()=>{ selected.clear(); rerenderPreservingScroll(); };
+    const addBtn=hostEl.querySelector('#pickerAddBtn');
+    if(addBtn) addBtn.onclick=()=>{
+      if(!selected.size){ showToast('Pick at least one chapter.'); return; }
+      const loaded = loadFromSyllabusLibrary(key, t, selected);
+      if(!loaded){ showToast('Could not load \u2014 try again.'); return; }
+      const nameInp = document.getElementById('etName');
+      if(nameInp && !nameInp.value.trim()){ nameInp.value = entry.subject; t.name = entry.subject; }
+      const chCount = t.chapters.length;
+      const cb=document.getElementById('editChapsBtn');
+      if(cb) cb.innerHTML = `\ud83d\udcdd Review chapters (${chCount}) <span class="ai-badge" style="background:var(--mint);">Syllabus</span>`;
+      showToast(`\u2705 Added ${selected.size} chapter(s) from ${entry.label} \u2014 0 tokens used!`);
+      openChaptersModal(t, isNew); // show the result immediately
+    };
+  }
+
+  hostEl.innerHTML = renderList();
+  bindPicker();
+}
 
 const AI_MODELS = {
   claude: {
@@ -2299,7 +3208,7 @@ const AIService = {
    * without asking the student to re-upload.
    * Returns { subject, aiSummary, chapters:[{name,durationMin,difficulty,keyTopics,text:'',hasPdfContent}] }
    */
-  async processPDF(file){
+  async processPDF(file, cacheKeyPrefix){
     const b64 = await new Promise((res,rej)=>{
       const r=new FileReader();
       r.onload  = ev => res(ev.target.result.split(',')[1]);
@@ -2307,24 +3216,27 @@ const AIService = {
       r.readAsDataURL(file);
     });
 
-    const prompt = `Scan this document's structure ONLY — do not read or analyse the content of any chapter in depth.
+    const prompt = `You are a study planner extracting chapter structure from lecture notes. Work efficiently — identify structure first, don't over-analyse.
 
-Look at the table of contents, headings, and/or the file name "${file.name}" to identify:
-  • The subject/module name
-  • Top-level chapter titles ONLY (never list sub-chapters like "10.1" separately — one entry per top-level chapter/major section)
-  • A rough study-time estimate per chapter (multiple of 30 minutes: 30=short, 60=medium, 90=dense, 120=complex) based on page count/heading depth alone
-  • A rough difficulty guess (1-5) based on the topic name alone
-  • 2-3 key topic words per chapter, inferred from the heading text only
+FILE NAME: "${file.name}"
 
-Do NOT summarise, explain, or quote chapter content. This is a structure scan, not a content review — keep it fast.
+Decide ONE file = ONE chapter, or MULTIPLE chapters, using the filename first:
+  • If the filename itself names one specific chapter/topic (contains a number like "10.1", "Chapter 5", "Topic 3", "Unit 2", or is a single clear topic like "Mitosis.pdf") → this file IS exactly ONE chapter. Return exactly one entry. Don't split it further even if the content has sub-headings — use the filename's own title (minus extension) as the chapter name, keeping any section number, e.g. "10.1 What are Transport Systems.pdf" → "10.1 What are Transport Systems".
+  • Only if the filename is generic ("Notes.pdf", "Textbook.pdf") or clearly spans multiple topics → scan the Table of Contents/headings for top-level chapters only (never list sub-chapters like "10.1" separately within an already-multi-chapter file). Max 2 splits if one chapter is unusually long.
 
-Return ONLY valid JSON, no markdown fences, no explanation:
+FOR EACH CHAPTER, quickly provide:
+  estimatedMinutes — multiple of 30 (30=short, 60=medium, 90=dense, 120=complex)
+  difficulty — 1-5
+  keyTopics — 2-3 short phrases
+  notes — a BRIEF study summary, 60-90 words, tight bullet-style core facts only (this is the sole reference for later quiz generation — don't pad, don't re-explain, just the essentials)
+
+Return ONLY valid JSON, no markdown fences:
 {
   "subject": "<module/course name>",
-  "aiSummary": "<one sentence, inferred from titles/cover page only>",
+  "aiSummary": "<one sentence>",
   "recommendedDaysBeforeExam": <integer>,
   "chapters": [
-    { "title":"<exact chapter title>", "estimatedMinutes":<multiple of 30>, "difficulty":<1-5>, "keyTopics":["…","…"] }
+    { "title":"<exact title>", "estimatedMinutes":<int>, "difficulty":<1-5>, "keyTopics":["…"], "notes":"<brief summary>" }
   ]
 }`;
 
@@ -2334,26 +3246,55 @@ Return ONLY valid JSON, no markdown fences, no explanation:
         {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}},
         {type:'text', text:prompt},
       ],
-    }], {maxTokens:900}); // small output budget = fast — titles only, no content
+    }], {maxTokens:2200});
 
-    // Cache the PDF bytes in memory so Phase 2 (quiz time) can read a specific
-    // chapter's content later without re-uploading. Never written to localStorage.
-    const cacheKey = 'pdf_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
-    window._pdfCache = window._pdfCache || {};
-    window._pdfCache[cacheKey] = b64;
+    // Cache the PDF bytes in memory ONLY so the student can re-open/view the original
+    // file later from the Variable Tasks list — the AI never needs these bytes again
+    // after this single pass; every future quiz call uses the cached notes text below.
+    if(cacheKeyPrefix){
+      window._pdfCache = window._pdfCache || {};
+      window._pdfCache[cacheKeyPrefix+'|'+file.name] = b64;
+    }
 
-    const chapters = (data.chapters||[]).map(c=>({
-      name         : String(c.title||c.name||'Untitled'),
-      durationMin  : Math.max(30, Math.round((Number(c.estimatedMinutes||c.durationMin)||60)/30)*30),
-      difficulty   : Math.max(1, Math.min(5, Number(c.difficulty)||3)),
-      keyTopics    : Array.isArray(c.keyTopics)?c.keyTopics:[],
-      text         : '',        // NOT filled yet — populated lazily the first time a quiz is generated (Phase 2)
-      confidence   : 0,         // 0 = not studied yet; updated by gradeQuiz later
-      quizHistory  : [],
-      hasPdfContent: true,
-      _sourceFile  : file.name,
-      _pdfCacheKey : cacheKey,  // where to find this chapter's source PDF when quiz time comes
-    }));
+    let chapters = (data.chapters||[]).map(c=>{
+      const durationMin = Math.max(30, Math.round((Number(c.estimatedMinutes||c.durationMin)||60)/30)*30);
+      return {
+        name         : String(c.title||c.name||'Untitled'),
+        durationMin,
+        difficulty   : Math.max(1, Math.min(5, Number(c.difficulty)||3)),
+        keyTopics    : Array.isArray(c.keyTopics)?c.keyTopics:[],
+        text         : String(c.notes||'').trim(), // cached study notes — used for every future quiz/grade call
+        confidence   : 0,                            // 0 = not studied yet; updated by gradeQuiz later
+        quizHistory  : [],
+        hasPdfContent: true,
+        _sourceFile  : file.name,
+        // Default to natural ~60-90min sessions rather than one long block for multi-hour
+        // chapters — student can always adjust this in the chapters editor afterward.
+        sessions     : Math.max(1, Math.min(6, Math.round(durationMin/75))),
+      };
+    });
+
+    // Safety net: if the filename clearly names ONE specific numbered chapter/section
+    // (e.g. "10.1 What are Transport Systems.pdf") but the AI still split it into
+    // multiple entries, collapse them back into one. This guarantees "one specifically-
+    // numbered file = one chapter" even if the model doesn't perfectly follow the prompt.
+    const cleanFileName = file.name.replace(/\.pdf$/i,'').trim();
+    const singleChapterFilePattern = /^\s*(\d+(\.\d+)+\.?|\d+\.\s|chapter\s*\d+|topic\s*\d+|unit\s*\d+|section\s*\d+|lesson\s*\d+)\b/i;
+    if(chapters.length>1 && singleChapterFilePattern.test(cleanFileName)){
+      const mergedDuration = Math.max(30, Math.round(chapters.reduce((s,c)=>s+c.durationMin,0)/30)*30);
+      chapters = [{
+        name         : cleanFileName,
+        durationMin  : mergedDuration,
+        difficulty   : Math.max(...chapters.map(c=>c.difficulty||3)),
+        keyTopics    : [...new Set(chapters.flatMap(c=>c.keyTopics||[]))].slice(0,4),
+        text         : chapters.map(c=>c.text).filter(Boolean).join('\n\n'),
+        confidence   : 0,
+        quizHistory  : [],
+        hasPdfContent: true,
+        _sourceFile  : file.name,
+        sessions     : Math.max(1, Math.min(6, Math.round(mergedDuration/75))),
+      }];
+    }
 
     if(!chapters.length) throw new Error('NO_CHAPTERS: AI could not identify any chapters in this PDF. It may be image-only/scanned, or not structured as lecture notes.');
 
@@ -2366,74 +3307,35 @@ Return ONLY valid JSON, no markdown fences, no explanation:
   },
 
   /**
-   * PHASE 2 — Quiz-time: read content ONLY for the one chapter being quizzed.
-   * First call for a chapter: reads that chapter's content from the cached
-   * PDF (still in memory from upload), extracts concise study notes AND
-   * generates the quiz in a single pass, then caches the notes so any
-   * retake/regrade never needs the PDF again.
-   * Later calls for the same chapter: cheap, text-only — no PDF involved.
+   * Generate a quiz for ONE chapter using its cached study notes (populated
+   * once, at upload time, by processPDF). Never touches the PDF again.
    * Returns [{q, opts:[4], ans:0-3}, ...]
    */
   async generateQuiz(chapter, count=10){
-    // Fast path — content was already extracted on a previous quiz for this chapter
-    if(chapter.text){
-      return this._generateQuizFromText(chapter, count);
-    }
+    if(!chapter.text) throw new Error('NO_TEXT: This chapter has no cached study notes — re-upload its PDF via Edit to enable a quiz.');
 
-    // First time this chapter is quizzed — need to read its content from the source PDF
-    const b64 = (window._pdfCache||{})[chapter._pdfCacheKey];
-    if(!b64) throw new Error('PDF_EXPIRED: This chapter\'s source PDF is no longer cached (e.g. the page was reloaded). Re-upload it to enable a quiz for this chapter.');
-
-    const prompt = `This PDF contains multiple chapters. Focus ONLY on the chapter titled "${chapter.name}" — ignore all other chapters entirely.
-
-Do two things:
-1. Write a concise study-notes summary of JUST that chapter's content (~120-220 words, the core concepts/definitions/facts a student must know, as compact bullet points).
-2. Based on those notes, create exactly ${count} multiple-choice questions testing understanding of that chapter's concepts. Mix recall, application, and analysis. All 4 options must be plausible. Questions must be self-contained.
-
-Return ONLY valid JSON, no markdown fences:
-{
-  "notes": "<concise study summary of just this chapter>",
-  "questions": [{"q":"Question?","opts":["A","B","C","D"],"ans":0}]
-}
-"ans" is the 0-based index of the correct option.`;
-
-    const data = await aiCallJson([{
-      role:'user',
-      content:[
-        {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}},
-        {type:'text', text:prompt},
-      ],
-    }], {maxTokens:2600});
-
-    if(!Array.isArray(data.questions)||!data.questions.length) throw new Error('NO_QUESTIONS: AI returned no questions. Try again.');
-
-    // Cache the extracted notes on the chapter — every future call for this
-    // chapter (retakes, re-grading) now uses the cheap text-only path.
-    chapter.text = String(data.notes||'').trim();
-
-    return data.questions;
-  },
-
-  /** Cheap, text-only quiz generation — used once a chapter's notes are already cached. */
-  async _generateQuizFromText(chapter, count){
+    const keyTerms = (chapter.keyTopics||[]).join(', ');
     const prompt = `You are a teacher creating a post-study quiz for a student who just studied this chapter:
 
 Chapter: "${chapter.name}"
-Key topics: ${(chapter.keyTopics||[]).join(', ')||'(none listed)'}
+Key terms from the syllabus: ${keyTerms||'(none listed)'}
 
 Study notes (this is the ONLY source material — base every question on it):
 """
 ${chapter.text}
 """
 
-Create exactly ${count} multiple-choice questions testing understanding of the concepts above.
-Mix recall, application, and analysis. All 4 options must be plausible. Questions must be self-contained.
+Create exactly ${count} multiple-choice questions testing understanding of the chapter. Cover a mix:
+  • Definitions — test that the student can correctly define or identify the key terms listed above
+  • Key concepts — test understanding of the main ideas and how/why things happen (not just recall)
+  • Application — test whether the student can apply a concept to a new example or scenario
+All 4 options must be plausible (no giveaway wrong answers). Questions must be self-contained (don't require seeing a diagram/image).
 
 Return ONLY valid JSON, no markdown fences:
 {"questions":[{"q":"Question?","opts":["A","B","C","D"],"ans":0}]}
 "ans" is the 0-based index of the correct option.`;
 
-    const data = await aiCallJson([{role:'user',content:prompt}], {maxTokens:2200});
+    const data = await aiCallJson([{role:'user',content:prompt}], {maxTokens:2400});
     if(!Array.isArray(data.questions)||!data.questions.length) throw new Error('NO_QUESTIONS: AI returned no questions. Try again.');
     return data.questions;
   },
@@ -2519,22 +3421,46 @@ function openEditTaskModal(task){
   const stT = t.startTime||'16:00';
   const enT = t.endTime||slotToTime(Math.min(SLOTS-1,timeToSlot(stT)+Math.max(1,Math.ceil((Number(t.durationMin)||60)/Math.max(1,Number(t.sessions)||1)/30))));
 
+  const levelSubjects = syllabusForCurrentLevel();
+  const syllabusOptions = levelSubjects.map(([key,e])=>`<option value="${key}">${e.label}</option>`).join('');
+  const levelLabel = STUDENT_LEVELS.find(l=>l.key===studentLevel)?.label;
+  const syllabusPanel = isExam ? `
+    <div class="ai-panel" style="border-color:var(--mint);background:var(--mint-soft);">
+      <div class="ai-panel-head">
+        <span class="ai-panel-title" style="color:#1F7A57;">📚 Syllabus Library</span>
+        <span style="font-size:10px;font-weight:700;color:#1F7A57;background:#fff;border-radius:4px;padding:2px 6px;">FREE · INSTANT</span>
+      </div>
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px;">
+        Pick a subject below — a list of chapters (from the official syllabus's guiding questions) will appear right here for you to choose from.
+        ${levelLabel?` Showing subjects for <b>${levelLabel}</b>.`:` <button id="setLevelHint" style="border:none;background:none;color:var(--lav);font-weight:700;text-decoration:underline;cursor:pointer;padding:0;font-size:12.5px;">Set your level</button> to narrow this list.`}
+      </div>
+      <select id="syllabusPick" style="width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 10px;font-size:13px;background:#fff;">
+        <option value="">Choose a subject…</option>
+        ${syllabusOptions}
+      </select>
+      <div id="syllabusChapterPicker" style="margin-top:12px;"></div>
+      <div style="font-size:11px;color:var(--ink-faint);margin-top:8px;">${levelSubjects.length} of ${Object.keys(SYLLABUS_LIBRARY).length} subject(s) available for your level — more added over time. Don't see yours? Upload a PDF below instead.</div>
+    </div>` : '';
+
   const aiPanel = isExam ? `
+    ${syllabusPanel}
     <div class="ai-panel">
       <div class="ai-panel-head">
-        <span class="ai-panel-title">🤖 AI Study Planner</span>
+        <span class="ai-panel-title">🤖 Or: AI Study Planner</span>
         <button class="ai-key-hint" id="aiKeyHint">${hasKey?'✅ API key set · change':'⚙️ Set API key first'}</button>
       </div>
       ${hasKey
         ? `<div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px;">
-             Upload one or more lecture note PDFs — AI reads each one and merges all chapters into one study plan.
+             Not in the library? Add PDFs (click "Choose files" more than once to pick from different folders), then hit Analyze to process them all together.
            </div>
-           <label class="ai-upload-label">📄 Upload PDFs (select multiple)<input type="file" id="pdfUpload" accept=".pdf" multiple></label>
+           <label class="ai-upload-label">📄 Choose files<input type="file" id="pdfUpload" accept=".pdf" multiple></label>
+           <div id="aiStagedList" style="margin-top:10px;display:flex;flex-direction:column;gap:5px;"></div>
+           <button class="btn btn-mint" id="aiAnalyzeBtn" style="display:none;margin-top:10px;font-size:13px;padding:9px;">🚀 Analyze <span id="aiAnalyzeCount">0</span> file(s)</button>
            <div id="aiFileList" style="margin-top:10px;display:flex;flex-direction:column;gap:5px;"></div>
            <div id="aiProgress" class="ai-progress"><div id="aiProgressBar" class="ai-progress-bar"></div></div>
            <div id="aiStatus" class="ai-status"></div>`
         : `<div style="font-size:13px;color:var(--ink-soft);">
-             Add an AI API key in Settings (⚙️) to enable AI PDF analysis — choose Claude or the free Gemini tier.
+             Not in the library above? Add an AI API key in Settings (⚙️) to enable PDF upload — choose Claude or the free Gemini tier.
            </div>`}
     </div>
     <button class="btn btn-ghost" id="editChapsBtn" style="margin-bottom:10px;font-size:13px;">
@@ -2549,18 +3475,20 @@ function openEditTaskModal(task){
   openModal(`
     <h3 style="margin-bottom:14px;">${isNew?'New task':'Edit task'}</h3>
     <div class="field"><label>Name</label><input id="etName" value="${(t.name||'').replace(/"/g,'&quot;')}" placeholder="e.g. Biology Exam"></div>
-    <div class="inline-row">
-      <div class="field"><label>Type</label>
+    <div class="inline-row" style="align-items:flex-end;">
+      <div class="field" style="flex:2;"><label>Type</label>
         <select id="etType">
           <option value="task"  ${!isExam?'selected':''}>Task / Homework</option>
           <option value="exam"  ${isExam ?'selected':''}>Exam / Test revision</option>
         </select>
       </div>
-      <div class="field"><label>Priority</label><input id="etPri" type="number" min="1" value="${t.priority||1}" style="width:70px;"></div>
+      <div class="field" style="flex:1;"><label>Priority</label><input id="etPri" type="number" min="1" value="${t.priority||1}"></div>
+      <div class="field" style="flex:0 0 42px;"><label style="white-space:nowrap;">Colour</label>
+        <input id="etColor" type="color" value="${t.color}" style="width:42px;height:38px;padding:2px;border-radius:9px;cursor:pointer;">
+      </div>
     </div>
     <div class="field"><label>${isExam?'Exam date':'Due date'}</label><input id="etDue" type="date" value="${t.dueDate}"></div>
     ${aiPanel}
-    <div class="inline-row"><div class="field"><label>Colour</label><input id="etColor" type="color" value="${t.color}" style="height:42px;"></div></div>
     <div class="modal-actions">
       <button class="btn btn-accent" id="etSave">${isNew?'Add to schedule':'Save changes'}</button>
       <button class="btn btn-ghost"  id="mClose">Cancel</button>
@@ -2572,7 +3500,10 @@ function openEditTaskModal(task){
     t.name = document.getElementById('etName').value||t.name;
     t.dueDate = document.getElementById('etDue').value||t.dueDate;
     t.startTime = document.getElementById('etStart')?.value||t.startTime; t.endTime = document.getElementById('etEnd')?.value||t.endTime;
-    if(t.type==='exam'&&!t.chapters) t.chapters=[{name:'Chapter 1',durationMin:60,difficulty:3,keyTopics:[]}];
+    // NOTE: deliberately do NOT auto-create a default "Chapter 1" here — that used to get
+    // silently appended to by the Syllabus Library/PDF upload flows, leaving a phantom
+    // unwanted chapter in the list. Chapters only get created when the student actually
+    // adds them (via the Syllabus Library picker, PDF upload, or the manual chapters editor).
     openEditTaskModal(t);
   });
 
@@ -2583,16 +3514,68 @@ function openEditTaskModal(task){
   // open settings to add key
   const kh = document.getElementById('aiKeyHint');
   if(kh) kh.onclick = ()=>{ closeModal(); openSettingsModal(); };
+  const slh = document.getElementById('setLevelHint');
+  if(slh) slh.onclick = ()=>{ closeModal(); openSettingsModal(); };
 
-  // ── AI PDF upload — processes files ONE AT A TIME (sequential, not parallel) ──
-  // Each PDF is analysed exactly once via AIService.processPDF(). The extracted
-  // per-chapter study notes are cached on chapter.text, so quiz generation and
-  // grading later never need to re-read the PDF — keeping token cost minimal
-  // even when a student uploads many files across many exams.
+  // ── Syllabus Library — instant, zero-token chapter loading, inline picker ──
+  const syllabusPick = document.getElementById('syllabusPick');
+  if(syllabusPick){
+    syllabusPick.addEventListener('change', ()=>{
+      const key = syllabusPick.value;
+      const pickerHost = document.getElementById('syllabusChapterPicker');
+      if(!pickerHost) return;
+      if(!key){ pickerHost.innerHTML=''; return; }
+      renderSyllabusChapterPicker(pickerHost, key, t, isNew);
+    });
+  }
+
+  // ── AI PDF upload — stage files first, analyze on demand ──────────────────
+  // The picker can be opened more than once (files accumulate across openings,
+  // so a student can grab files from several different folders) before a single
+  // "Analyze" click kicks off processing. Files are still processed ONE AT A TIME
+  // (sequential, not parallel) via AIService.processPDF() — each PDF is read
+  // exactly once, ever; the extracted study notes are cached on chapter.text so
+  // quiz generation and grading later never re-read the PDF.
+  let stagedFiles = [];
   const pdfInput = document.getElementById('pdfUpload');
+  const stagedListEl = document.getElementById('aiStagedList');
+  const analyzeBtn = document.getElementById('aiAnalyzeBtn');
+  const analyzeCountEl = document.getElementById('aiAnalyzeCount');
+
+  function renderStagedList(){
+    if(!stagedListEl) return;
+    stagedListEl.innerHTML = stagedFiles.map((f,i)=>`
+      <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 8px;background:#fff;border-radius:8px;border:1px solid var(--line);">
+        <span style="font-size:14px;">📄</span>
+        <span style="flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${f.name}</span>
+        <span style="font-size:10.5px;color:var(--ink-faint);white-space:nowrap;">${Math.round(f.size/1024)} KB</span>
+        <button data-unstage="${i}" style="border:none;background:none;color:var(--ink-faint);cursor:pointer;font-size:14px;padding:0 2px;" title="Remove">✕</button>
+      </div>`).join('');
+    stagedListEl.querySelectorAll('[data-unstage]').forEach(b=>{
+      b.onclick=()=>{ stagedFiles.splice(Number(b.dataset.unstage),1); renderStagedList(); };
+    });
+    if(analyzeBtn){
+      analyzeBtn.style.display = stagedFiles.length ? 'block' : 'none';
+      if(analyzeCountEl) analyzeCountEl.textContent = stagedFiles.length;
+    }
+  }
+
   if(pdfInput){
-    pdfInput.addEventListener('change', async e=>{
-      const files = Array.from(e.target.files||[]);
+    pdfInput.addEventListener('change', e=>{
+      const picked = Array.from(e.target.files||[]);
+      // Merge into the staged list, skipping exact duplicate name+size re-picks
+      picked.forEach(f=>{
+        if(!stagedFiles.some(s=>s.name===f.name&&s.size===f.size)) stagedFiles.push(f);
+      });
+      pdfInput.value=''; // reset so picking the same file again still fires 'change'
+      renderStagedList();
+      showToast(stagedFiles.length+' file(s) staged — pick more or click Analyze.');
+    });
+  }
+
+  if(analyzeBtn){
+    analyzeBtn.addEventListener('click', async ()=>{
+      const files = stagedFiles;
       if(!files.length) return;
 
       const status   = document.getElementById('aiStatus');
@@ -2633,7 +3616,7 @@ function openEditTaskModal(task){
         setRowStatus(row,'📚 scanning chapters…','var(--lav)');
         status.textContent=`Scanning ${i+1} of ${files.length}: ${file.name}… (titles only, fast)`;
         try{
-          const result = await AIService.processPDF(file);
+          const result = await AIService.processPDF(file, t.id);
           setRowStatus(row,'✅ '+result.chapters.length+' chapter'+(result.chapters.length!==1?'s':''),'#1F7A57');
           row.style.borderColor='var(--mint)';
           results.push({ok:true, ...result, fileName:file.name, fileSize:file.size});
@@ -2660,31 +3643,46 @@ function openEditTaskModal(task){
         return;
       }
 
-      // Merge chapters into the task (each chapter carries its own cached .text)
-      t.chapters = allChaps;
+      // Append new chapters instead of overwriting — this lets students upload more
+      // PDFs later (via Edit) to add chapters without losing what's already there.
+      // Re-uploading a file with the SAME name replaces just that file's chapters.
+      const newFileNames = new Set(results.filter(r=>r.ok).map(r=>r.fileName));
+      const existingChapters = Array.isArray(t.chapters) ? t.chapters : [];
+      const keptChapters = existingChapters.filter(c => !c._sourceFile || !newFileNames.has(c._sourceFile));
+      t.chapters = [...keptChapters, ...allChaps];
       if(!Array.isArray(t.pdfFiles)) t.pdfFiles=[];
       results.filter(r=>r.ok).forEach(r=>{
-        if(!t.pdfFiles.some(p=>p.name===r.fileName)){
-          t.pdfFiles.push({name:r.fileName,size:r.fileSize,uploadedAt:new Date().toISOString()});
-        }
+        const existingIdx = t.pdfFiles.findIndex(p=>p.name===r.fileName);
+        const entry = {name:r.fileName,size:r.fileSize,uploadedAt:new Date().toISOString()};
+        if(existingIdx===-1) t.pdfFiles.push(entry);
+        else t.pdfFiles[existingIdx]=entry; // re-uploaded — refresh timestamp/size
       });
 
       const firstGood = results.find(r=>r.ok&&r.subject);
       const nameInp=document.getElementById('etName');
       if(nameInp&&!nameInp.value.trim()&&firstGood){ nameInp.value=firstGood.subject; t.name=firstGood.subject; }
 
-      const totalH = (allChaps.reduce((s,c)=>s+c.durationMin,0)/60).toFixed(1);
+      const newH = (allChaps.reduce((s,c)=>s+c.durationMin,0)/60).toFixed(1);
+      const totalChapCount = t.chapters.length;
+      const totalH = (t.chapters.reduce((s,c)=>s+(c.durationMin||0),0)/60).toFixed(1);
       const maxDays = Math.max(7, ...results.filter(r=>r.ok).map(r=>r.recommendedDaysBeforeExam||7));
+      const isAppend = keptChapters.length>0;
 
       status.className='ai-status ok';
-      status.innerHTML=`✅ <b>${allChaps.length}</b> chapters from <b>${results.filter(r=>r.ok).length}</b> PDF${files.length!==1?'s':''} · <b>${totalH}h</b> total study time · Start <b>${maxDays}+ days</b> before exam.`
+      status.innerHTML=`✅ <b>+${allChaps.length}</b> chapter${allChaps.length!==1?'s':''} from <b>${results.filter(r=>r.ok).length}</b> PDF${files.length!==1?'s':''} (${newH}h)`
+        + (isAppend?` — <b>${totalChapCount} chapters total</b>, ${totalH}h`:'')
+        + ` · Start <b>${maxDays}+ days</b> before exam.`
         + (failCount?`<br><span style="color:var(--coral);font-weight:400;">${failCount} file${failCount!==1?'s':''} failed — see status above for the reason.</span>`:'');
 
       const lbl=document.getElementById('chapCountLabel');
-      if(lbl) lbl.textContent=` ${allChaps.length} chapters · AI ✨`;
+      if(lbl) lbl.textContent=` ${totalChapCount} chapters · AI ✨`;
       const cb=document.getElementById('editChapsBtn');
-      if(cb) cb.innerHTML=`📝 Review AI chapters (${allChaps.length}) <span class="ai-badge">AI</span>`;
-      showToast(`AI found ${allChaps.length} chapters across ${files.length} PDF${files.length!==1?'s':''} — review then save!`);
+      if(cb) cb.innerHTML=`📝 Review AI chapters (${totalChapCount}) <span class="ai-badge">AI</span>`;
+      showToast(`AI added ${allChaps.length} more chapter${allChaps.length!==1?'s':''} (${totalChapCount} total) — review then save!`);
+
+      // Clear the staging area now that this batch has been processed
+      stagedFiles = [];
+      renderStagedList();
     });
   }
 
@@ -2715,30 +3713,70 @@ function openEditTaskModal(task){
 
 function openChaptersModal(task,fromNew){
   if(!Array.isArray(task.chapters)||!task.chapters.length)
-    task.chapters=[{name:'Chapter 1',durationMin:60,difficulty:3,keyTopics:[]}];
+    task.chapters=[{name:'Chapter 1',durationMin:60,difficulty:3,keyTopics:[],sessions:1}];
+
+  const expandedRows = new Set(); // tracks which chapter rows have their guiding-question breakdown open
+  const DIFF_COLORS = ['#8FCB8F','#C8D97A','#F4C84D','#F0954C','#E0524A']; // easy(green) → very difficult(red)
 
   function chapRows(){
     return task.chapters.map((c,i)=>{
-      const stars=[1,2,3,4,5].map(n=>`<span class="star-btn ${n<=(c.difficulty||0)?'lit':'small'}" data-ci="${i}" data-sv="${n}">★</span>`).join('');
-      return `<tr draggable="true" data-chrow="${i}" style="transition:background .12s;">
+      const diffLevel = c.difficulty||3;
+      const diffBar = [1,2,3,4,5].map(n=>{
+        const filled = n<=diffLevel;
+        const radius = n===1?'4px 0 0 4px':n===5?'0 4px 4px 0':'0';
+        return `<span data-ci="${i}" data-dv="${n}" title="Difficulty ${n}/5" style="flex:1;height:15px;cursor:pointer;background:${filled?DIFF_COLORS[n-1]:'var(--line)'};border-radius:${radius};transition:background .1s;"></span>`;
+      }).join('');
+      const difficultyCell = `
+        <div style="display:flex;flex-direction:column;gap:2px;width:96px;">
+          <div class="diff-bar" data-ci="${i}" style="display:flex;gap:1px;">${diffBar}</div>
+          <div style="display:flex;justify-content:space-between;font-size:8px;color:var(--ink-faint);"><span>Easy</span><span>Very difficult</span></div>
+        </div>`;
+      const hasGQ = Array.isArray(c.guidingQuestions) && c.guidingQuestions.length>0;
+      const isOpen = expandedRows.has(i);
+      const mainRow = `<tr draggable="true" data-chrow="${i}" style="transition:background .12s;">
         <td style="padding:6px 2px 6px 6px;border-bottom:1px solid var(--line);cursor:grab;user-select:none;" class="chap-grip" title="Drag to reorder">
           <span style="font-size:15px;color:var(--ink-faint);letter-spacing:-1px;">⠿</span>
         </td>
         <td style="padding:6px 8px;border-bottom:1px solid var(--line);width:100%;">
           <input type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" data-ci="${i}" data-cf="name"
             style="width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-size:13.5px;background:#fff;box-sizing:border-box;">
+          ${hasGQ?`<button data-gqtoggle="${i}" style="border:none;background:none;color:var(--lav);font-size:11px;font-weight:700;cursor:pointer;margin-top:4px;padding:2px 0;">
+              ${isOpen?'▼':'▶'} ${c.guidingQuestions.length} guiding question${c.guidingQuestions.length!==1?'s':''} (subchapters)
+            </button>`:''}
         </td>
         <td style="padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">
           <input type="number" min="5" step="5" value="${c.durationMin||60}" data-ci="${i}" data-cf="dur"
             style="width:72px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;font-size:13.5px;"> <small style="color:var(--ink-soft);">min</small>
         </td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">
+          <input type="number" min="1" max="8" step="1" value="${c.sessions||1}" data-ci="${i}" data-cf="sessions"
+            style="width:48px;border:1px solid var(--line);border-radius:7px;padding:7px 6px;font-size:13.5px;text-align:center;"
+            title="Split this chapter's study time into this many separate sessions">
+        </td>
         <td style="padding:6px 8px;border-bottom:1px solid var(--line);">
-          <div style="display:flex;gap:1px;">${stars}</div>
+          ${difficultyCell}
         </td>
         <td style="padding:6px 4px;border-bottom:1px solid var(--line);">
           <button class="row-del" data-crd="${i}">✕</button>
         </td>
       </tr>`;
+
+      const detailRow = (hasGQ && isOpen) ? `<tr data-gqdetail="${i}">
+        <td></td>
+        <td colspan="5" style="padding:4px 8px 14px 8px;border-bottom:1px solid var(--line);background:#FAFAFD;">
+          <div style="display:flex;flex-direction:column;gap:10px;padding:8px 4px 2px;">
+            ${c.guidingQuestions.map(gq=>`
+              <div style="border-left:3px solid var(--lav);padding-left:10px;">
+                <div style="font-size:12.5px;font-weight:700;color:var(--ink);margin-bottom:3px;">${gq.question}</div>
+                ${gq.outcomes&&gq.outcomes.length?`<div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:3px;"><b>Learning outcomes:</b> ${gq.outcomes.join('; ')}</div>`:''}
+                <div style="font-size:11.5px;color:var(--ink-soft);line-height:1.5;margin-bottom:5px;"><b>Content:</b> ${gq.content||''}</div>
+                ${gq.terms&&gq.terms.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;">${gq.terms.map(t=>`<span style="font-size:10px;font-weight:600;background:var(--lav-soft);color:var(--lav);border-radius:999px;padding:2px 8px;">${t}</span>`).join('')}</div>`:''}
+              </div>`).join('')}
+          </div>
+        </td>
+      </tr>` : '';
+
+      return mainRow + detailRow;
     }).join('');
   }
 
@@ -2755,6 +3793,7 @@ function openChaptersModal(task,fromNew){
             <th style="width:24px;"></th>
             <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);">Chapter title</th>
             <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Study time</th>
+            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;" title="Split the study time into this many separate sessions, e.g. 3 hours ÷ 3 sessions = 3×1hr blocks">Sessions</th>
             <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);">Difficulty</th>
             <th style="width:32px;"></th>
           </tr>
@@ -2775,15 +3814,23 @@ function openChaptersModal(task,fromNew){
         const i=Number(inp.dataset.ci);
         if(inp.dataset.cf==='name') task.chapters[i].name=inp.value;
         if(inp.dataset.cf==='dur')  task.chapters[i].durationMin=Number(inp.value)||30;
+        if(inp.dataset.cf==='sessions') task.chapters[i].sessions=Math.max(1,Math.min(8,Number(inp.value)||1));
       });
       inp.addEventListener('focus',()=>inp.style.borderColor='var(--lav)');
       inp.addEventListener('blur', ()=>inp.style.borderColor='var(--line)');
     });
-    document.querySelectorAll('.star-btn[data-ci]').forEach(s=>{
-      s.onclick=()=>{ task.chapters[Number(s.dataset.ci)].difficulty=Number(s.dataset.sv); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
+    document.querySelectorAll('[data-dv]').forEach(seg=>{
+      seg.onclick=()=>{ task.chapters[Number(seg.dataset.ci)].difficulty=Number(seg.dataset.dv); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
     });
     document.querySelectorAll('[data-crd]').forEach(b=>{
       b.onclick=()=>{ const i=Number(b.dataset.crd); if(task.chapters.length<=1){showToast('Need at least one chapter.');return;} task.chapters.splice(i,1); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
+    });
+    document.querySelectorAll('[data-gqtoggle]').forEach(b=>{
+      b.onclick=()=>{
+        const i=Number(b.dataset.gqtoggle);
+        if(expandedRows.has(i)) expandedRows.delete(i); else expandedRows.add(i);
+        document.getElementById('chapRows').innerHTML=chapRows(); bind();
+      };
     });
     // ── drag-to-reorder ──
     let dragIdx=null;
@@ -2818,7 +3865,7 @@ function openChaptersModal(task,fromNew){
   bind();
 
   document.getElementById('chapAdd').onclick=()=>{
-    task.chapters.push({name:'Chapter '+(task.chapters.length+1),durationMin:60,difficulty:3,keyTopics:[]});
+    task.chapters.push({name:'Chapter '+(task.chapters.length+1),durationMin:60,difficulty:3,keyTopics:[],sessions:1});
     document.getElementById('chapRows').innerHTML=chapRows(); bind();
   };
   const _reset=()=>{ const b=document.getElementById('modalBox'); if(b) b.style.maxWidth=''; };
@@ -2884,23 +3931,44 @@ function openSettingsModal(){
       </div>
     </div>
 
+    <div style="background:var(--mint-soft);border-radius:12px;padding:14px 16px;margin-bottom:18px;">
+      <div style="font-size:12px;font-weight:800;color:#1F7A57;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">🎓 Your Level</div>
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px;">
+        Narrows the Syllabus Library and practice quizzes to subjects for your level.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        ${STUDENT_LEVELS.map(l=>`
+          <button class="level-btn ${studentLevel===l.key?'active':''}" data-level="${l.key}" style="border:1.5px solid var(--line);background:#fff;border-radius:9px;padding:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:center;">${l.label}</button>
+        `).join('')}
+      </div>
+    </div>
+
     <div style="font-size:12px;font-weight:800;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;">📅 Daily study caps</div>
     <div class="field"><label>School days max (hours)</label><input id="setSchool" type="number" min="1" max="12" step="0.5" value="${schoolDayCapHours}"></div>
     <div class="field"><label>Non-school days max (hours)</label><input id="setNonSchool" type="number" min="1" max="14" step="0.5" value="${nonSchoolDayCapHours}"></div>
 
     <button class="btn btn-ghost" id="setReplayTut" style="width:100%;margin:6px 0 4px;border:1px dashed var(--line-strong);">🎓 Replay setup tutorial</button>
-    <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">${CLOUD?'☁️ Your schedule syncs across devices. AI keys stay on this device only.':'💾 Cloud sync is off — data is saved in this browser only.'}</div>
+    <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">${CLOUD?'☁️ Your schedule, quizzes and stickers sync across devices. AI keys stay on this device only.':'💾 Cloud sync is off — data is saved in this browser only.'}</div>
     <div class="modal-actions">
       <button class="btn btn-accent" id="setSave">Save</button>
       <button class="btn btn-ghost"  id="mClose">Cancel</button>
     </div>`);
+
+  let selectedLevel = studentLevel;
+  document.querySelectorAll('.level-btn').forEach(btn=>{
+    btn.onclick=()=>{
+      selectedLevel = (selectedLevel===btn.dataset.level) ? '' : btn.dataset.level; // click again to clear
+      document.querySelectorAll('.level-btn').forEach(b=>b.classList.toggle('active', b.dataset.level===selectedLevel));
+    };
+  });
 
   // inline style for the provider toggle buttons (scoped once, harmless if repeated)
   if(!document.getElementById('provBtnStyle')){
     const s=document.createElement('style');
     s.id='provBtnStyle';
     s.textContent=`.prov-btn{border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer;text-align:left;color:var(--ink);}
-      .prov-btn.active{border-color:var(--lav);background:#fff;box-shadow:0 0 0 2px var(--lav-soft);}`;
+      .prov-btn.active{border-color:var(--lav);background:#fff;box-shadow:0 0 0 2px var(--lav-soft);}
+      .level-btn.active{border-color:var(--mint);background:var(--mint-soft);color:#1F7A57;box-shadow:0 0 0 2px rgba(63,191,147,0.25);}`;
     document.head.appendChild(s);
   }
 
@@ -2928,7 +3996,10 @@ function openSettingsModal(){
     saveGeminiKey(document.getElementById('setGeminiKey').value);
     schoolDayCapHours    = Math.max(0.5,Number(document.getElementById('setSchool').value)||4);
     nonSchoolDayCapHours = Math.max(0.5,Number(document.getElementById('setNonSchool').value)||6);
-    tutorialNote('settings'); saveCurrentData(); runScheduler(); closeModal(); showToast('Settings saved!');
+    studentLevel = selectedLevel;
+    tutorialNote('settings');
+    saveCurrentData();
+    runScheduler(); closeModal(); refreshQuizHistoryView(); showToast('Settings saved!');
   };
 }
 function openEditFSModal(fs,preset){
@@ -2958,15 +4029,11 @@ function openEditFSModal(fs,preset){
     f.start=document.getElementById('fsStart').value;
     f.end=document.getElementById('fsEnd').value;
     if(isNew)fixedSchedules.push(f);
-    closeModal();renderSheet();renderWeek();saveCurrentData();showToast(isNew?'Added!':'Saved!');
+    closeModal();saveCurrentData();refreshScheduleView();renderWeek();showToast(isNew?'Added!':'Saved!');
   };
   const delB=document.getElementById('fsDel');
-  if(delB)delB.onclick=()=>{fixedSchedules=fixedSchedules.filter(x=>x.id!==f.id);closeModal();renderSheet();renderWeek();};
+  if(delB)delB.onclick=()=>{fixedSchedules=fixedSchedules.filter(x=>x.id!==f.id);closeModal();saveCurrentData();refreshScheduleView();renderWeek();};
 }
-/* =============================================
-   QUIZ SYSTEM — triggered after every exam study/revision block
-   ============================================= */
-
 /* =============================================
    QUIZ SYSTEM — triggered after every exam study/revision block
    Quiz generation now goes through AIService.generateQuiz(chapter), which
@@ -2996,6 +4063,53 @@ function starsToNextStep(stars){
   if(stars>=3) return 'OK — a revision has been scheduled in a few days.';
   if(stars>=2) return 'Weak — a full re-study is booked within 48 hours.';
   return 'Struggling — another full study session is booked for tomorrow!';
+}
+
+/**
+ * Reusable review modal for ANY stored quiz attempt — shows the full Q&A with
+ * correct/incorrect highlighting, plus a notes textarea (autosaved). Used both from
+ * the calendar block detail sheet and the Quiz History tab.
+ * `attempt` shape: {id, date, taskName, chapterName, score, confidence, questions, userAnswers, notes}
+ * `onNotesChange(text)` — optional callback to persist edited notes back to the right place.
+ */
+function openQuizReviewModal(attempt, onNotesChange){
+  const pct = attempt.score;
+  const colour = pctToColour(pct);
+  const correct = attempt.questions.filter((q,i)=>attempt.userAnswers[i]===q.ans).length;
+  const dateLabel = new Date(attempt.date).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+
+  openModal(`
+    <div style="text-align:center;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--line);">
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:2px;">${attempt.chapterName||''}</div>
+      <div class="quiz-score-big" style="color:${colour};font-size:38px;">${pct}%</div>
+      <div style="font-size:13px;color:var(--ink-soft);">${correct} / ${attempt.questions.length} correct · ${dateLabel}</div>
+    </div>
+    <div style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
+      ${attempt.questions.map((q,i)=>{
+        const ok=attempt.userAnswers[i]===q.ans;
+        return `<div style="background:${ok?'var(--mint-soft)':'var(--coral-soft)'};border-radius:9px;padding:10px 13px;">
+          <div style="font-size:11px;font-weight:700;color:${ok?'var(--mint)':'var(--coral)'};margin-bottom:4px;">Q${i+1} — ${ok?'Correct ✓':'Wrong ✗'}</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:5px;line-height:1.4;">${q.q}</div>
+          ${!ok&&attempt.userAnswers[i]!==-1?`<div style="font-size:12px;color:var(--ink-soft);margin-bottom:2px;">Your answer: <span style="text-decoration:line-through;">${q.opts[attempt.userAnswers[i]]}</span></div>`:''}
+          <div style="font-size:12.5px;font-weight:600;color:${ok?'#1F7A57':'var(--ink)'};">✓ ${q.opts[q.ans]}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="field">
+      <label>📝 My notes on this chapter</label>
+      <textarea id="quizReviewNotes" rows="3" placeholder="Jot down anything you want to remember for next time…" style="resize:vertical;">${(attempt.notes||'').replace(/</g,'&lt;')}</textarea>
+    </div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="mClose">Close</button></div>`);
+
+  const notesEl = document.getElementById('quizReviewNotes');
+  if(notesEl){
+    let saveTimer=null;
+    notesEl.addEventListener('input',()=>{
+      attempt.notes = notesEl.value;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(()=>{ if(onNotesChange) onNotesChange(notesEl.value); saveCurrentData(); }, 500);
+    });
+  }
 }
 
 async function openQuizModal(a){
@@ -3183,12 +4297,23 @@ async function openQuizModal(a){
         catch(_){ /* keep deterministic fallback above */ }
       }
 
-      _reset(); closeModal();
-
       if(t2&&ch2){
         ch2.confidence = grade.confidence;
         ch2.quizHistory = Array.isArray(ch2.quizHistory) ? ch2.quizHistory : [];
-        ch2.quizHistory.push({date:new Date().toISOString(), score:grade.score, confidence:grade.confidence, weakTopics:grade.weakTopics});
+        // Store the FULL attempt (questions + the student's answers), not just the score —
+        // this is what lets the Quiz tab (and the block detail sheet) show a complete
+        // review of any past attempt later.
+        const attemptId = uid();
+        ch2.quizHistory.push({
+          id: attemptId,
+          date: new Date().toISOString(),
+          taskId: t2.id, taskName: t2.name,
+          chapterIndex: a.sessionIndex, chapterName: ch2.name,
+          score: grade.score, confidence: grade.confidence, weakTopics: grade.weakTopics||[],
+          questions: questions, userAnswers: userAnswers,
+          notes: '',
+        });
+        a.quizAttemptId = attemptId; // links THIS specific study block to the attempt it produced
         if(!t2.chapterConfidence) t2.chapterConfidence={};
         t2.chapterConfidence[a.sessionIndex]=grade.confidence;
         AIService.scheduleRevision(t2, a.sessionIndex, grade.confidence);
@@ -3196,7 +4321,13 @@ async function openQuizModal(a){
 
       saveCurrentData(); renderWeek(); refreshTasksView();
       const weakNote = grade.weakTopics&&grade.weakTopics.length ? ` Focus next time on: ${grade.weakTopics.slice(0,2).join(', ')}.` : '';
-      showToast(pct>=75?`${pct}% — great work! Next session scheduled.${weakNote}`:`${pct}% — another session booked to help you improve.${weakNote}`);
+      showToast(pct>=75?`${pct}% — great work! Saved to your Quiz tab.${weakNote}`:`${pct}% — another session booked. Saved to your Quiz tab.${weakNote}`);
+
+      // Don't auto-close — let the student keep reviewing their answers (the accordion
+      // above is still open/available) before dismissing. Swap the button to "Close".
+      btn.disabled=false;
+      btn.textContent='Close';
+      btn.onclick=()=>{ _reset(); closeModal(); };
     };
   }
 
@@ -3331,11 +4462,10 @@ document.getElementById('loginSubmit').onclick=async()=>{
 if(CLOUD){
   const card=document.querySelector('#loginScreen .login-card');
   card.style.visibility='hidden'; // avoid flashing the form while we check for a saved session
-  setTimeout(()=>{card.style.visibility='visible';},3000); // never leave the login form hidden if the auth check is slow
   fbAuth.onAuthStateChanged(async user=>{
     if(!authBusy&&!currentUser&&user){
-      authBusy=true;card.style.visibility='visible';
-      let err;try{err=await withTimeout(startCloudSession(user),20000);}catch(e){err=cloudErr(e);}
+      authBusy=true;
+      let err;try{err=await startCloudSession(user);}catch(e){err=cloudErr(e);}
       authBusy=false;
       if(!err){enterApp();return;}
       document.getElementById('loginErr').textContent=err;
@@ -3449,7 +4579,7 @@ function renderTutorial(){
     const list=variableTasks.map(t=>`<li>✓ <b>${tutEsc(t.name)}</b> · ${t.type==='exam'?'Exam':'Task'} · due ${tutEsc(t.dueDate)}</li>`).join('');
     inner=`<div class="tut-dots">${dots}</div><div class="tut-kicker">Step 2 of 3</div>
       <h3>Your tasks &amp; exams</h3>
-      <p>Add homework, assignments or exams with a due date. Stackle spreads study blocks through your free time before each deadline.</p>
+      <p>Add homework, assignments or exams with a due date and a start/end time. For exams you can load chapters straight from the built-in MOE syllabus library. Stackle spreads study blocks through your free time before each deadline.</p>
       <button class="tut-accent" data-act="addtask">➕ Add a task or exam</button>
       ${list?`<ul class="tut-done">${list}</ul>`:''}
       <div class="tut-row"><button class="tut-ghost" data-act="back">← Back</button>
@@ -3458,9 +4588,9 @@ function renderTutorial(){
   }else if(s===3){
     inner=`<div class="tut-dots">${dots}</div><div class="tut-kicker">Step 3 of 3</div>
       <h3>Set your study time</h3>
-      <p>Open Settings and choose the most hours Stackle may schedule per day — fewer on school days, more on weekends.</p>
+      <p>Open Settings, pick your level (so you see the right syllabus), and choose the most hours Stackle may schedule per day — fewer on school days, more on weekends.</p>
       <button class="tut-accent" data-act="settings">⚙️ Open Settings</button>
-      <ul class="tut-done" style="${tut.settingsSaved?'':'display:none'}"><li>✓ School days up to <b>${schoolDayCapHours}h</b> · other days up to <b>${nonSchoolDayCapHours}h</b></li></ul>
+      <ul class="tut-done" style="${tut.settingsSaved?'':'display:none'}"><li>✓ School days up to <b>${schoolDayCapHours}h</b> · other days up to <b>${nonSchoolDayCapHours}h</b>${studentLevel?' · level set':''}</li></ul>
       <div class="tut-hint">Optional: you can also add an AI key there to unlock PDF study plans and quizzes.</div>
       <div class="tut-row"><button class="tut-ghost" data-act="back">← Back</button>
         <button class="tut-primary" data-act="next" ${tut.settingsSaved?'':'disabled'}>Finish ✓</button></div>
@@ -3490,7 +4620,7 @@ function renderTutorial(){
    ============================================= */
 function initApp(){
   weekStart=mondayOf(new Date());viewStart=14;viewEnd=46;dayCount=7;currentTab='cal';
-  if(!assignments.length)runScheduler();else renderWeek(); // keep saved blocks (incl. manual moves) instead of rebuilding on every login
+  if(!assignments.length)runScheduler();else renderWeek(); // keep saved blocks (manual moves, follow-ups, quiz links) instead of rebuilding on every login
   updateStats();
   if(isDesktop()){
     _lastDesktop=true;
