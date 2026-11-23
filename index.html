@@ -95,6 +95,7 @@ input,select,textarea{font-family:inherit;color:var(--ink);}
 .block .bname{font-weight:700;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10.5px;}
 .block .bphase,.block .btime{font-size:9px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.85;font-weight:600;}
 .block.fixed{background:var(--grey-soft,#E7E9EE);color:#454D5C;cursor:grab;}
+.block.fixed.blue{background:#D6E6FF;color:#1F4A91;border-color:rgba(46,100,200,.25);}
 .block.task{cursor:grab;}
 .block.done{opacity:.55;}
 .block.overdue{border-style:dashed;}
@@ -150,6 +151,7 @@ input,select,textarea{font-family:inherit;color:var(--ink);}
 .fs-card{background:var(--bg);border-radius:var(--r-sm);padding:11px 14px;margin-bottom:8px;
   display:flex;align-items:center;gap:12px;}
 .fs-dot{width:10px;height:10px;border-radius:50%;background:var(--grey);flex-shrink:0;}
+.fs-dot.blue{background:#4D8DEE;}
 .fs-body{flex:1;}
 .fs-name{font-size:14px;font-weight:700;}
 .fs-meta{font-size:11.5px;color:var(--ink-soft);}
@@ -458,7 +460,8 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
           <div class="week-grid" id="weekGridD"></div>
         </div>
         <div class="cal-legend" style="position:static;">
-          <span><i class="swatch" style="background:var(--grey-soft);border:1px solid var(--grey)"></i>Fixed</span>
+          <span><i class="swatch" style="background:var(--grey-soft);border:1px solid var(--grey)"></i>Sleep/School</span>
+        <span><i class="swatch" style="background:#D6E6FF;border:1px solid #4D8DEE"></i>Fixed</span>
           <span><i class="swatch" style="background:var(--coral)"></i>Task</span>
           <span style="margin-left:auto;color:var(--ink-faint)">Click block for details · click empty slot to add task · drag to move</span>
         </div>
@@ -525,7 +528,8 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
         <div class="week-grid" id="weekGrid"></div>
       </div>
       <div class="cal-legend">
-        <span><i class="swatch" style="background:var(--grey-soft);border:1px solid var(--grey)"></i>Fixed</span>
+        <span><i class="swatch" style="background:var(--grey-soft);border:1px solid var(--grey)"></i>Sleep/School</span>
+        <span><i class="swatch" style="background:#D6E6FF;border:1px solid #4D8DEE"></i>Fixed</span>
         <span><i class="swatch" style="background:var(--coral)"></i>Task</span>
         <span style="margin-left:auto;color:var(--ink-faint)">Tap block · tap empty to add</span>
       </div>
@@ -593,7 +597,7 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
 const SLOTS=48,ROWH=26,STUDY_S=12,STUDY_E=46,NOW_BUF=2,SCH_BUF=4;
 const MAX_CONSEC=8;
 const DAY_NAMES=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-const TASK_PALETTE=['#FF6B5B','#3FBF93','#8E7CC3','#4D8DEE','#FF9F5B','#46B8C2','#D162B4','#7BC142'];
+const TASK_PALETTE=['#FF6B5B','#3FBF93','#8E7CC3','#F2B134','#FF9F5B','#B5651D','#D162B4','#7BC142'];
 const uid=()=>'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 
 // Stickers
@@ -609,6 +613,7 @@ function parseDate(s){const[y,m,d]=s.split('-').map(Number);return new Date(y,m-
 function mondayOf(d){const x=startOfDay(d);const dow=(x.getDay()+6)%7;return addDays(x,-dow);}
 function slotLabel(i){return String(Math.floor(i/2)).padStart(2,'0')+':'+(i%2?'30':'00');}
 function timeToSlot(t){const[h,m]=t.split(':').map(Number);return h*2+(m>=30?1:0);}
+function timeToMin(t){const[h,m]=t.split(':').map(Number);return h*60+m;}
 function slotToTime(s){s=((s%48)+48)%48;return String(Math.floor(s/2)).padStart(2,'0')+':'+(s%2?'30':'00');}
 function dayIdx(dateStr){return(parseDate(dateStr).getDay()+6)%7;}
 function fmtShort(d){return d.toLocaleDateString('en-SG',{day:'numeric',month:'short'});}
@@ -898,6 +903,7 @@ async function refreshFriendProfiles(){
 
 function hydrateState(){
   variableTasks=ud.variableTasks||[];
+  variableTasks.forEach(v=>{if(v.color==='#4D8DEE')v.color='#F2B134';else if(v.color==='#46B8C2')v.color='#B5651D';}); // blue is now reserved for fixed schedules
   fixedSchedules=ud.fixedSchedules||[];
   assignments=ud.assignments||[];
   completedSlots=new Set(ud.completedSlotsArr||[]);
@@ -1012,8 +1018,33 @@ function splitBlocks(tot,ses){
 //   Pass 4: cap✗ buffer✗ consec✓   (busy + no buffer, still forces a break every 4h)
 //   Pass 5: cap✓ buffer✓ consec✗   (deadline pressure — allow a longer study run)
 //   Pass 6: cap✗ buffer✗ consec✗   (deadline is critical — fit it wherever it physically fits)
+// Tasks with a start time try that time of day first (before the due date, then anywhere), then fall back to the normal cascade.
+function placeAtPreferred(task,asgn,len,from,end,extra){
+  if(task.type==='exam'||!task.startTime||!extra||extra.phase!=='task')return null;
+  const ps=timeToSlot(task.startTime);
+  if(ps+len>SLOTS)return null;
+  const now=new Date(),todayK=dateKey(now),nowS=now.getHours()*2+(now.getMinutes()>=30?1:0);
+  const due=parseDate(task.dueDate);
+  for(const lim of [due<end?due:end,end]){
+    for(const useCap of [true,false]){
+      let cur=new Date(from);
+      while(cur<=lim){
+        const ds=dateKey(cur);
+        if(!(ds===todayK&&ps<nowS+NOW_BUF)){
+          const{fx,tx}=gridForDate(ds,asgn);
+          let ok=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,ps+k)){ok=false;break;}}
+          const capS=(schoolFloor(ds)>0?schoolDayCapHours:nonSchoolDayCapHours)*2;
+          if(ok&&(!useCap||dayLoad(tx)+len<=capS)){asgn.push(Object.assign({id:uid(),taskId:task.id,date:ds,startSlot:ps,len},extra));return cur;}
+        }
+        cur=addDays(cur,1);
+      }
+    }
+  }
+  return null;
+}
 function placeChunk(task,asgn,len,from,end,extra){
-  return placePass(task,asgn,len,from,end,extra,true, true, true )
+  return placeAtPreferred(task,asgn,len,from,end,extra)
+      || placePass(task,asgn,len,from,end,extra,true, true, true )
       || placePass(task,asgn,len,from,end,extra,false,true, true )
       || placePass(task,asgn,len,from,end,extra,true, false,true )
       || placePass(task,asgn,len,from,end,extra,false,false,true )
@@ -1050,8 +1081,14 @@ function chapLen(c){return Math.max(1,Math.ceil((Number(c.durationMin)||30)/30))
 
 function scheduleRegular(task,asgn,today){
   const uns=[],due=parseDate(task.dueDate);
-  const tot=Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
-  const sizes=splitBlocks(tot,Number(task.sessions)||1);
+  let sizes;
+  if(task.startTime&&task.endTime){ // start/end time = each session's window; "sessions" = how many of them
+    const len1=Math.max(1,Math.ceil((timeToMin(task.endTime)-timeToMin(task.startTime))/30));
+    sizes=new Array(Math.max(1,Number(task.sessions)||1)).fill(len1);
+  }else{ // older tasks saved with a total duration
+    const tot=Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
+    sizes=splitBlocks(tot,Number(task.sessions)||1);
+  }
   let cur=today;
   sizes.forEach((len,i)=>{
     const h=addDays(due>today?due:today,14);
@@ -1399,9 +1436,11 @@ document.getElementById('hideSleepBtnD').onclick=()=>{const btn=document.getElem
 let _lastDesktop=null;
 window.addEventListener('resize',()=>{const d=isDesktop();if(d!==_lastDesktop){_lastDesktop=d;if(d){switchDesktopTab('cal');wireDsbInputs();}else switchTab('cal');}});
 function clipBlock(slot,len){const vS=Math.max(slot,viewStart),vE=Math.min(slot+len,viewEnd);return vE>vS?{top:(vS-viewStart)*ROWH,h:(vE-vS)*ROWH-2,ok:true}:{ok:false};}
+// Sleep and School stay grey; every other fixed schedule is blue.
+const fixedIsGrey=name=>/sleep|school/i.test(name||'');
 function makeFixedBlock(fs,slot,len,ds){
   const{top,h,ok}=clipBlock(slot,len);if(!ok)return null;
-  const el=document.createElement('div');el.className='block fixed';
+  const el=document.createElement('div');el.className='block fixed'+(fixedIsGrey(fs.name)?'':' blue');
   el.style.top=top+'px';el.style.height=h+'px';el.draggable=true;
   el.title=fs.name+' '+slotLabel(slot)+'–'+slotLabel(slot+len);
   el.innerHTML=`<span class="bname">${fs.name}</span><span class="btime">${slotLabel(slot)}–${slotLabel(slot+len)}</span>`;
@@ -1807,7 +1846,7 @@ function renderTasksSheet(body){
           <td style="padding:11px 12px;white-space:nowrap;font-size:13px;">${t.dueDate}</td>
           <td style="padding:11px 12px;white-space:nowrap;">
             <div style="font-weight:700;">${totalMin} min</div>
-            <div style="font-size:11.5px;color:var(--ink-soft);">${totalH}h total</div>
+            <div style="font-size:11.5px;color:var(--ink-soft);">${totalH}h total${(!isExam&&t.startTime&&t.endTime)?` · ${t.startTime}–${t.endTime}`:''}</div>
           </td>
           <td style="padding:11px 12px;min-width:220px;">${chapCell}</td>
           <td style="padding:11px 8px;white-space:nowrap;">
@@ -1852,7 +1891,7 @@ function renderScheduleSheet(body){
   let html='';
   fixedSchedules.forEach(fs=>{
     const days=fs.days.map(d=>DAY_NAMES[d]).join(', ');
-    html+=`<div class="fs-card"><div class="fs-dot"></div><div class="fs-body"><div class="fs-name">${fs.name}</div><div class="fs-meta">${days} · ${fs.start}–${fs.end}</div></div>
+    html+=`<div class="fs-card"><div class="fs-dot${fixedIsGrey(fs.name)?'':' blue'}"></div><div class="fs-body"><div class="fs-name">${fs.name}</div><div class="fs-meta">${days} · ${fs.start}–${fs.end}</div></div>
       <button class="fs-edit" data-fsed="${fs.id}">Edit</button></div>`;
   });
   html+=`<button class="add-btn" id="addFSBtn">+ Add fixed schedule</button>`;
@@ -2026,9 +2065,10 @@ function openAddTask(ds,slot){
     <h3>Quick add task</h3><div class="sub">${fmtShort(parseDate(ds))} · starting ${slotLabel(adjSlot)}</div>
     <div class="field"><label>Name</label><input id="qtName" type="text" placeholder="e.g. Read chapter 3"></div>
     <div class="inline-row">
-      <div class="field"><label>Duration (min)</label><input id="qtMin" type="number" min="30" step="30" value="30"></div>
-      <div class="field"><label>Colour</label><input id="qtColor" type="color" value="${color}" style="height:42px;"></div>
+      <div class="field"><label>Start time</label><input id="qtStart" type="time" step="1800" value="${slotToTime(adjSlot)}"></div>
+      <div class="field"><label>End time</label><input id="qtEnd" type="time" step="1800" value="${adjSlot+1>=SLOTS?'23:59':slotToTime(adjSlot+1)}"></div>
     </div>
+    <div class="inline-row"><div class="field"><label>Colour</label><input id="qtColor" type="color" value="${color}" style="height:42px;"></div></div>
     <div class="modal-actions">
       <button class="btn btn-accent" id="qtAdd">Add to calendar</button>
       <button class="btn btn-ghost" id="mClose">Cancel</button>
@@ -2036,13 +2076,16 @@ function openAddTask(ds,slot){
   setTimeout(()=>document.getElementById('qtName')?.focus(),80);
   document.getElementById('qtAdd').onclick=()=>{
     const name=document.getElementById('qtName').value.trim()||'New task';
-    const dMin=Math.max(30,Number(document.getElementById('qtMin').value)||30);
+    const stV=document.getElementById('qtStart').value,enV=document.getElementById('qtEnd').value;
+    if(!stV||!enV||timeToMin(enV)<=timeToMin(stV)){showToast('End time must be after start time.');return;}
     const col=document.getElementById('qtColor').value;
-    const len=Math.max(1,Math.ceil(dMin/30));
+    const len=Math.max(1,Math.ceil((timeToMin(enV)-timeToMin(stV))/30));
+    const dMin=len*30;
+    adjSlot=Math.max(timeToSlot(stV),ds===todayK?nowS+NOW_BUF:0);
     const{fx,tx}=gridForDate(ds,assignments);
     let fs=adjSlot;let ok=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,fs+k)){ok=false;break;}}
     if(!ok){for(let i=adjSlot;i<=SLOTS-len;i++){let f=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,i+k)){f=false;break;}}if(f){fs=i;break;}}}
-    const t={id:uid(),name,type:'task',dueDate:ds,durationMin:dMin,sessions:1,priority:variableTasks.length+1,color:col};
+    const t={id:uid(),name,type:'task',dueDate:ds,durationMin:dMin,startTime:stV,endTime:enV,sessions:1,priority:variableTasks.length+1,color:col};
     variableTasks.push(t);
     assignments.push({id:uid(),taskId:t.id,date:ds,startSlot:fs,len,sessionIndex:0,phase:'task',overdue:false});
     closeModal();renderWeek();renderSheet();showToast('"'+name+'" added at '+slotLabel(fs));
@@ -2472,6 +2515,9 @@ function openEditTaskModal(task){
   const hasKey  = !!getApiKey();
   const chapCount = examChaps(t).length;
   const chapMin   = isExam ? examChaps(t).reduce((s,c)=>s+(c.durationMin||0),0) : 0;
+  // start/end shown for regular tasks; older tasks (saved with a duration) get a sensible default window
+  const stT = t.startTime||'16:00';
+  const enT = t.endTime||slotToTime(Math.min(SLOTS-1,timeToSlot(stT)+Math.max(1,Math.ceil((Number(t.durationMin)||60)/Math.max(1,Number(t.sessions)||1)/30))));
 
   const aiPanel = isExam ? `
     <div class="ai-panel">
@@ -2495,9 +2541,10 @@ function openEditTaskModal(task){
       📝 ${chapCount>0?`Edit chapters (${chapCount})`:'Add chapters'}<span style="font-size:11px;color:var(--ink-faint);"> ${chapMin?chapMin+'min total':''}</span>
     </button>` : `
     <div class="inline-row">
-      <div class="field"><label>Duration (min)</label><input id="etMin" type="number" min="5" step="5" value="${t.durationMin||60}"></div>
-      <div class="field"><label>Sessions</label><input id="etSes" type="number" min="1" value="${t.sessions||1}"></div>
-    </div>`;
+      <div class="field"><label>Start time</label><input id="etStart" type="time" step="1800" value="${stT}"></div>
+      <div class="field"><label>End time</label><input id="etEnd" type="time" step="1800" value="${enT}"></div>
+    </div>
+    <div class="field"><label>Sessions (how many times, one per day)</label><input id="etSes" type="number" min="1" value="${t.sessions||1}"></div>`;
 
   openModal(`
     <h3 style="margin-bottom:14px;">${isNew?'New task':'Edit task'}</h3>
@@ -2524,6 +2571,7 @@ function openEditTaskModal(task){
     t.type = document.getElementById('etType').value;
     t.name = document.getElementById('etName').value||t.name;
     t.dueDate = document.getElementById('etDue').value||t.dueDate;
+    t.startTime = document.getElementById('etStart')?.value||t.startTime; t.endTime = document.getElementById('etEnd')?.value||t.endTime;
     if(t.type==='exam'&&!t.chapters) t.chapters=[{name:'Chapter 1',durationMin:60,difficulty:3,keyTopics:[]}];
     openEditTaskModal(t);
   });
@@ -2642,12 +2690,20 @@ function openEditTaskModal(task){
 
   // save
   document.getElementById('etSave').onclick=()=>{
+    if(document.getElementById('etType').value!=='exam'){
+      const stV=document.getElementById('etStart')?.value,enV=document.getElementById('etEnd')?.value;
+      if(!stV||!enV||timeToMin(enV)<=timeToMin(stV)){showToast('End time must be after start time.');return;}
+    }
     t.name    = document.getElementById('etName').value.trim()||'Task';
     t.dueDate = document.getElementById('etDue').value;
     t.priority= Number(document.getElementById('etPri').value)||1;
     t.color   = document.getElementById('etColor').value;
     t.type    = document.getElementById('etType').value;
-    if(t.type!=='exam'){ t.durationMin=Number(document.getElementById('etMin')?.value)||60; t.sessions=Number(document.getElementById('etSes')?.value)||1; }
+    if(t.type!=='exam'){
+      t.startTime=document.getElementById('etStart').value; t.endTime=document.getElementById('etEnd').value;
+      t.sessions=Math.max(1,Number(document.getElementById('etSes')?.value)||1);
+      t.durationMin=Math.ceil((timeToMin(t.endTime)-timeToMin(t.startTime))/30)*30*t.sessions; // total, kept for the task list
+    }
     if(isNew) variableTasks.push(t);
     closeModal();
     runScheduler();
