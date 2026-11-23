@@ -1427,7 +1427,15 @@ function _renderGrid(gridId,labelId){
     const head=document.createElement('div');
     head.className='day-head'+(ds===todayStr?' is-today':'');
     const exams=variableTasks.filter(t=>t.type==='exam'&&t.dueDate===ds);
-    if(exams.length&&!dayReminders[ds])dayReminders[ds]='🔴 '+exams.map(t=>t.name).join(', ')+'!';
+    // The red exam banner is auto-generated ("🔴 Name!"). Keep it in step with the tasks: add it for exam days,
+    // refresh it if the exam is renamed or another exam shares the day, and remove it once the exam is gone.
+    // A reminder the student typed themselves (anything not in that auto format) is left alone.
+    {
+      const curR=dayReminders[ds];
+      const isAuto=typeof curR==='string'&&curR.startsWith('🔴 ')&&curR.endsWith('!');
+      if(exams.length){ if(!curR||isAuto)dayReminders[ds]='🔴 '+exams.map(t=>t.name).join(', ')+'!'; }
+      else if(isAuto){ delete dayReminders[ds]; }
+    }
     head.innerHTML=`<div class="dname">${DAY_NAMES[dayIdx(ds)]}</div>
       <input class="reminder${exams.length?' exam-day':''}" placeholder=" " value="${dayReminders[ds]||''}">
       <div class="ddate">${d.getDate()}</div>`;
