@@ -1042,6 +1042,38 @@ function placeAtPreferred(task,asgn,len,from,end,extra){
   }
   return null;
 }
+// LAST RESORT BEFORE A DEADLINE. The deadline beats every soft rule: this ignores the ideal daily study hours,
+// buffers, the 4h-consecutive limit, the "now" buffer and the usual 06:00-23:00 study window (only fixed schedules
+// such as sleep and school stay off-limits). It first looks for one contiguous gap; if none exists it splits the block
+// into smaller pieces. Returns {date: last day used (or null), left: slots that still did not fit}.
+function squeezeInto(task,asgn,len,from,end,extra){
+  const now=new Date(),todayK=dateKey(now),nowS=Math.min(SLOTS,now.getHours()*2+(now.getMinutes()>=30?1:0)+1);
+  const startSlot=ds=>ds===todayK?nowS:10; // from 05:00, or just after now on today
+  // stage 1 — one contiguous block
+  let cur=new Date(from);
+  while(cur<=end){
+    const ds=dateKey(cur),{fx,tx}=gridForDate(ds,asgn);
+    for(let i=startSlot(ds);i<=SLOTS-len;i++){
+      let ok=true;for(let k=0;k<len;k++){if(!isFree(fx,tx,i+k)){ok=false;break;}}
+      if(ok){asgn.push(Object.assign({id:uid(),taskId:task.id,date:ds,startSlot:i,len},extra));return{date:new Date(cur),left:0};}
+    }
+    cur=addDays(cur,1);
+  }
+  // stage 2 — split into pieces across whatever free time exists before the deadline
+  let left=len,last=null;cur=new Date(from);
+  while(cur<=end&&left>0){
+    const ds=dateKey(cur),{fx,tx}=gridForDate(ds,asgn);
+    let i=startSlot(ds);
+    while(i<SLOTS&&left>0){
+      if(!isFree(fx,tx,i)){i++;continue;}
+      let j=i;while(j<SLOTS&&isFree(fx,tx,j)&&j-i<left)j++;
+      asgn.push(Object.assign({id:uid(),taskId:task.id,date:ds,startSlot:i,len:j-i},extra));
+      left-=j-i;last=new Date(cur);i=j;
+    }
+    cur=addDays(cur,1);
+  }
+  return{date:last,left};
+}
 function placeChunk(task,asgn,len,from,end,extra){
   return placeAtPreferred(task,asgn,len,from,end,extra)
       || placePass(task,asgn,len,from,end,extra,true, true, true, true )
@@ -1103,17 +1135,19 @@ function scheduleRegular(task,asgn,today){
   sizes.forEach((len,i)=>{
     const target=addDays(today,Math.min(span-1,Math.floor(i*span/sizes.length)));
     if(target>cur)cur=target;
-    const h=addDays(due>today?due:today,14);
-    const p=placeChunk(task,asgn,len,cur,h,{sessionIndex:i,phase:'task'});
-    if(p){asgn[asgn.length-1].overdue=p>due;cur=p;}
-    else{
-      // Retry from today before giving up (cur may have advanced past the horizon)
-      const p2=placeChunk(task,asgn,len,today,h,{sessionIndex:i,phase:'task'});
-      if(p2){asgn[asgn.length-1].overdue=p2>due;cur=p2;}
-      else uns.push({taskName:task.name,len,detail:'session '+(i+1),
-        reason:diagnoseWindow(task,asgn,len,today,h),
-        windowDesc:'searched '+dateKey(today)+' → '+dateKey(h)+' ('+(len*30)+'min block)'});
-    }
+    const dl=due>today?due:today,h=addDays(dl,14),ex={sessionIndex:i,phase:'task',overdue:false};
+    // 1) ideal placement on or before the due date, 2) out of spreading order but still before it,
+    // 3) squeeze (ignores ideal daily hours / buffers / usual study window), 4) only then a flagged catch-up after the due date
+    let p=placeChunk(task,asgn,len,cur,dl,ex);
+    if(!p&&cur>today)p=placeChunk(task,asgn,len,today,dl,ex);
+    if(p){cur=p;return;}
+    const r=squeezeInto(task,asgn,len,today,dl,ex);
+    if(r.date&&r.left===0){cur=r.date;return;}
+    const rest=r.left||len;
+    const p3=placeChunk(task,asgn,rest,today,h,Object.assign({},ex,{overdue:true}));
+    if(!p3)uns.push({taskName:task.name,len:rest,detail:'session '+(i+1),
+      reason:'no free time before the deadline ('+diagnoseWindow(task,asgn,rest,today,dl)+')',
+      windowDesc:'searched '+dateKey(today)+' → '+dateKey(h)+' ('+(rest*30)+'min still needed)'});
   });return uns;
 }
 // Diagnose WHY nothing could be placed in [from..end] — returns a human-readable reason string
@@ -1153,9 +1187,9 @@ function scheduleExam(task,asgn,today){
   let revDays,studyDays;
   if(totalDays<=2){studyDays=totalDays;revDays=0;}
   else{revDays=Math.max(2,Math.min(4,Math.round(totalDays*0.3)));if(revDays>=totalDays)revDays=Math.max(1,totalDays-1);studyDays=totalDays-revDays;}
-  const sWend=addDays(today,studyDays-1);
-  const fullEnd=addDays(due,-1)>today?addDays(due,-1):today;
-  const graceEnd=addDays(due,7); // absolute last-resort catch-up window if nothing fit before the exam
+  const fullEnd=addDays(due,-1)>today?addDays(due,-1):today; // last day study may happen: the day BEFORE the exam
+  const sWend0=addDays(today,studyDays-1);
+  const sWend=sWend0>fullEnd?fullEnd:sWend0; // the study window must never reach the exam day itself
   const revStart=addDays(sWend,1);
   // Study in the order the student has arranged the chapters (drag-reorder in the
   // chapters modal sets this directly) — this is now the student's explicit priority
@@ -1178,15 +1212,19 @@ function scheduleExam(task,asgn,today){
       let p=placeChunk(task,asgn,len,sCur,sWend,extra);
       // Pass B: study window full — use ANY day before the exam (late study)
       if(!p)p=placeChunk(task,asgn,len,sCur,fullEnd,Object.assign({},extra,{phase:'study-late'}));
-      // Pass C: absolute last resort — even a fully-relaxed search of the entire
-      // pre-exam window found nothing. Squeeze it in shortly AFTER the exam date
-      // instead of leaving the chapter permanently unscheduled — flagged overdue
-      // so the calendar clearly shows this was a forced catch-up, not a plan.
-      if(!p)p=placeChunk(task,asgn,len,sCur,graceEnd,Object.assign({},extra,{phase:'study-late',overdue:true}));
-      if(p)sCur=p; // next session may share this day (the daily cap is soft) — chaining one session per day ran past the exam
-      else uns.push({taskName:task.name,len,detail:'study: '+chapName(task,idx)+(sessionSizes.length>1?' (session '+(sIdx+1)+'/'+sessionSizes.length+')':''),
-        reason:diagnoseWindow(task,asgn,len,today,fullEnd),
-        windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(len*30)+'min block)'});
+      // Pass C: out-of-order but still before the exam — the deadline matters more than chapter order
+      if(!p&&sCur>today)p=placeChunk(task,asgn,len,today,fullEnd,Object.assign({},extra,{phase:'study-late'}));
+      // Pass D: squeeze it in — ignores the ideal daily hours / buffers / usual study window, may split the block.
+      // Study blocks are NEVER placed on or after the exam date.
+      let left=0;
+      if(!p){
+        const r=squeezeInto(task,asgn,len,today,fullEnd,Object.assign({},extra,{phase:'study-late'}));
+        left=r.left;
+      }
+      if(p)sCur=p; // next session may share this day (the daily hours are only an ideal)
+      if(left>0)uns.push({taskName:task.name,len:left,detail:'study: '+chapName(task,idx)+(sessionSizes.length>1?' (session '+(sIdx+1)+'/'+sessionSizes.length+')':''),
+        reason:'no free time left before the exam — every free slot between now and '+dateKey(fullEnd)+' is already used or blocked by fixed schedules ('+diagnoseWindow(task,asgn,left,today,fullEnd)+')',
+        windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(left*30)+'min still needed)'});
     });
   });
   // Compute the ACTUAL latest date any deep-study session landed on — not just the
@@ -1213,11 +1251,13 @@ function scheduleExam(task,asgn,today){
       // revision can never be scheduled before deep study for this exam has happened.
       let p=placeChunk(task,asgn,rlen,td,fullEnd,extra);
       if(!p)p=placeChunk(task,asgn,rlen,revFloorBase,fullEnd,extra);
-      // Absolute last resort — same grace-window catch-up as study sessions above
-      if(!p)p=placeChunk(task,asgn,rlen,revFloorBase,graceEnd,Object.assign({},extra,{overdue:true}));
-      if(!p)uns.push({taskName:task.name,len:rlen,detail:'revision: '+chapName(task,idx),
-        reason:diagnoseWindow(task,asgn,rlen,today,fullEnd),
-        windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(rlen*30)+'min block)'});
+      if(!p)p=placeChunk(task,asgn,rlen,today,fullEnd,extra);
+      // Last resort — squeeze before the exam (never after it)
+      let rleft=0;
+      if(!p){const r=squeezeInto(task,asgn,rlen,today,fullEnd,extra);rleft=r.left;}
+      if(rleft>0)uns.push({taskName:task.name,len:rleft,detail:'revision: '+chapName(task,idx),
+        reason:'no free time left before the exam ('+diagnoseWindow(task,asgn,rleft,today,fullEnd)+')',
+        windowDesc:'searched '+dateKey(today)+' → '+dateKey(fullEnd)+' ('+(rleft*30)+'min still needed)'});
     });
   }return uns;
 }
@@ -3945,9 +3985,10 @@ function openSettingsModal(){
       </div>
     </div>
 
-    <div style="font-size:12px;font-weight:800;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;">📅 Daily study caps</div>
-    <div class="field"><label>School days max (hours)</label><input id="setSchool" type="number" min="1" max="12" step="0.5" value="${schoolDayCapHours}"></div>
-    <div class="field"><label>Non-school days max (hours)</label><input id="setNonSchool" type="number" min="1" max="14" step="0.5" value="${nonSchoolDayCapHours}"></div>
+    <div style="font-size:12px;font-weight:800;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;">📅 Ideal daily study hours</div>
+    <div style="font-size:12px;color:var(--ink-soft);margin:-4px 0 10px;line-height:1.45;">Stackle aims to keep each day within these hours. If a deadline is close, it will add more study time so everything is done <b>before</b> the deadline.</div>
+    <div class="field"><label>Ideal study hours — school days</label><input id="setSchool" type="number" min="1" max="12" step="0.5" value="${schoolDayCapHours}"></div>
+    <div class="field"><label>Ideal study hours — non-school days</label><input id="setNonSchool" type="number" min="1" max="14" step="0.5" value="${nonSchoolDayCapHours}"></div>
 
     <button class="btn btn-ghost" id="setReplayTut" style="width:100%;margin:6px 0 4px;border:1px dashed var(--line-strong);">🎓 Replay setup tutorial</button>
     <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">${CLOUD?'☁️ Your schedule, quizzes and stickers sync across devices. AI keys stay on this device only.':'💾 Cloud sync is off — data is saved in this browser only.'}</div>
@@ -4590,9 +4631,9 @@ function renderTutorial(){
   }else if(s===3){
     inner=`<div class="tut-dots">${dots}</div><div class="tut-kicker">Step 3 of 3</div>
       <h3>Set your study time</h3>
-      <p>Open Settings, pick your level (so you see the right syllabus), and choose the most hours Stackle may schedule per day — fewer on school days, more on weekends.</p>
+      <p>Open Settings, pick your level (so you see the right syllabus), and choose your ideal study hours per day — fewer on school days, more on weekends. Stackle can go over this when a deadline is close.</p>
       <button class="tut-accent" data-act="settings">⚙️ Open Settings</button>
-      <ul class="tut-done" style="${tut.settingsSaved?'':'display:none'}"><li>✓ School days up to <b>${schoolDayCapHours}h</b> · other days up to <b>${nonSchoolDayCapHours}h</b>${studentLevel?' · level set':''}</li></ul>
+      <ul class="tut-done" style="${tut.settingsSaved?'':'display:none'}"><li>✓ Ideal hours: school days <b>${schoolDayCapHours}h</b> · other days <b>${nonSchoolDayCapHours}h</b>${studentLevel?' · level set':''}</li></ul>
       <div class="tut-hint">Optional: you can also add an AI key there to unlock PDF study plans and quizzes.</div>
       <div class="tut-row"><button class="tut-ghost" data-act="back">← Back</button>
         <button class="tut-primary" data-act="next" ${tut.settingsSaved?'':'disabled'}>Finish ✓</button></div>
