@@ -1107,11 +1107,13 @@ function placePass(task,asgn,len,from,end,extra,cap,respectBuffer,respectConsec,
   }return null;
 }
 function examChaps(task){
-  return(Array.isArray(task.chapters)&&task.chapters.length)?task.chapters:[{name:'Chapter 1',durationMin:60,difficulty:3}];
+  return(Array.isArray(task.chapters)&&task.chapters.length)?task.chapters:[{name:'Chapter 1',durationMin:DEFAULT_CHAPTER_MIN,difficulty:3,sessions:DEFAULT_CHAPTER_SESSIONS}];
 }
 function chapName(task,idx){const c=examChaps(task);return(c[idx]&&c[idx].name)||'Chapter '+(idx+1);}
 function ordinal(n){const s=['th','st','nd','rd'],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);}
 // A chapter is 'challenging' if the student starred it (older chapters fall back to their difficulty rating).
+// Defaults for every new chapter: 2 hours of study, in 2 sessions (the student can change both in the chapters editor)
+const DEFAULT_CHAPTER_MIN=120, DEFAULT_CHAPTER_SESSIONS=2;
 const fmtHrs=min=>(+((Number(min)||0)/60).toFixed(2))+'h'; // minutes -> '1h', '0.5h', '2.5h'
 const chapIsChallenging=c=>c&&(c.challenging!==undefined?!!c.challenging:(Number(c.difficulty)||0)>=4);
 function chapLen(c){return Math.max(1,Math.ceil((Number(c.durationMin)||30)/30));}
@@ -2960,7 +2962,7 @@ function flattenSyllabusToPickerItems(entry){
           topicName: topic.name,
           topicIndex: ti,
           name: gq.question,
-          durationMin: gq.durationMin || Math.round((topic.durationMin||60)/topic.guidingQuestions.length/30)*30 || 30,
+          durationMin: DEFAULT_CHAPTER_MIN, // library suggestions are overridden by the app-wide default (2h)
           difficulty: gq.difficulty || topic.difficulty || 3,
           keyTopics: gq.terms || [],
           text: `${gq.question}\nLearning outcomes: ${(gq.outcomes||[]).join('; ')}\nContent: ${gq.content||''}\nKey terms: ${(gq.terms||[]).join(', ')}`,
@@ -2969,7 +2971,7 @@ function flattenSyllabusToPickerItems(entry){
     } else {
       items.push({
         id: ti+'-0', topicName: topic.name, topicIndex: ti, name: topic.name,
-        durationMin: topic.durationMin||60, difficulty: topic.difficulty||3,
+        durationMin: DEFAULT_CHAPTER_MIN, difficulty: topic.difficulty||3,
         keyTopics: topic.keyTopics||[], text: topic.text||'',
       });
     }
@@ -2992,7 +2994,7 @@ function loadFromSyllabusLibrary(key, task, selectedIds){
 
   const newChapters = chosen.map(it=>({
     name: it.name, durationMin: it.durationMin, difficulty: it.difficulty,
-    sessions: Math.max(1, Math.round(it.durationMin/60)) || 1,
+    sessions: DEFAULT_CHAPTER_SESSIONS,
     keyTopics: it.keyTopics, text: it.text,
     confidence: 0, quizHistory: [], hasPdfContent: true,
     _sourceFile: 'Syllabus Library: '+entry.label+' — '+it.topicName,
@@ -3788,7 +3790,7 @@ function openEditTaskModal(task){
 
 function openChaptersModal(task,fromNew){
   if(!Array.isArray(task.chapters)||!task.chapters.length)
-    task.chapters=[{name:'Chapter 1',durationMin:60,difficulty:3,keyTopics:[],sessions:1}];
+    task.chapters=[{name:'Chapter 1',durationMin:DEFAULT_CHAPTER_MIN,difficulty:3,keyTopics:[],sessions:DEFAULT_CHAPTER_SESSIONS}];
 
   const expandedRows = new Set(); // tracks which chapter rows have their guiding-question breakdown open
   const DIFF_COLORS = ['#8FCB8F','#C8D97A','#F4C84D','#F0954C','#E0524A']; // easy(green) → very difficult(red)
@@ -3939,7 +3941,7 @@ function openChaptersModal(task,fromNew){
   bind();
 
   document.getElementById('chapAdd').onclick=()=>{
-    task.chapters.push({name:'Chapter '+(task.chapters.length+1),durationMin:60,difficulty:3,keyTopics:[],sessions:1});
+    task.chapters.push({name:'Chapter '+(task.chapters.length+1),durationMin:DEFAULT_CHAPTER_MIN,difficulty:3,keyTopics:[],sessions:DEFAULT_CHAPTER_SESSIONS});
     document.getElementById('chapRows').innerHTML=chapRows(); bind();
   };
   const _reset=()=>{ const b=document.getElementById('modalBox'); if(b) b.style.maxWidth=''; };
