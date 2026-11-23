@@ -1090,12 +1090,19 @@ function scheduleRegular(task,asgn,today){
   if(task.startTime&&task.endTime){ // start/end = each session's window; "sessions" = how many of them
     const len1=Math.max(1,Math.ceil((timeToMin(task.endTime)-timeToMin(task.startTime))/30));
     sizes=new Array(Math.max(1,Number(task.sessions)||1)).fill(len1);
-  }else{ // older tasks saved with a total duration
+  }else{ // total time needed (hours entered by the student)
     const tot=Math.max(1,Math.ceil((Number(task.durationMin)||30)/30));
-    sizes=splitBlocks(tot,Number(task.sessions)||1);
+    // keep each sitting to at most 2 hours (and never longer than the daily study limit) — split further if needed
+    const capSlots=Math.max(1,Math.min(4,Math.floor(Math.min(schoolDayCapHours,nonSchoolDayCapHours)*2)));
+    const ses=Math.min(tot,Math.max(Number(task.sessions)||1,Math.ceil(tot/capSlots)));
+    sizes=splitBlocks(tot,ses);
   }
+  // spread sessions evenly from today to the deadline instead of front-loading them
+  const span=Math.max(1,Math.round((due-today)/86400000)+1);
   let cur=today;
   sizes.forEach((len,i)=>{
+    const target=addDays(today,Math.min(span-1,Math.floor(i*span/sizes.length)));
+    if(target>cur)cur=target;
     const h=addDays(due>today?due:today,14);
     const p=placeChunk(task,asgn,len,cur,h,{sessionIndex:i,phase:'task'});
     if(p){asgn[asgn.length-1].overdue=p>due;cur=addDays(p,1);}
@@ -3420,9 +3427,6 @@ function openEditTaskModal(task){
   const hasKey  = !!getApiKey();
   const chapCount = examChaps(t).length;
   const chapMin   = isExam ? examChaps(t).reduce((s,c)=>s+(c.durationMin||0),0) : 0;
-  // start/end shown for regular tasks; older tasks (saved with a duration) get a sensible default window
-  const stT = t.startTime||'16:00';
-  const enT = t.endTime||slotToTime(Math.min(SLOTS-1,timeToSlot(stT)+Math.max(1,Math.ceil((Number(t.durationMin)||60)/Math.max(1,Number(t.sessions)||1)/30))));
 
   const levelSubjects = syllabusForCurrentLevel();
   const syllabusOptions = levelSubjects.map(([key,e])=>`<option value="${key}">${e.label}</option>`).join('');
@@ -3470,10 +3474,10 @@ function openEditTaskModal(task){
       📝 ${chapCount>0?`Edit chapters (${chapCount})`:'Add chapters'}<span style="font-size:11px;color:var(--ink-faint);"> ${chapMin?fmtHrs(chapMin)+' total':''}</span>
     </button>` : `
     <div class="inline-row">
-      <div class="field"><label>Start time</label><input id="etStart" type="time" step="1800" value="${stT}"></div>
-      <div class="field"><label>End time</label><input id="etEnd" type="time" step="1800" value="${enT}"></div>
+      <div class="field"><label>Time needed (hours)</label><input id="etHours" type="number" min="0.5" step="0.5" value="${+((Number(t.durationMin)||60)/60).toFixed(2)}"></div>
+      <div class="field"><label>Split into sessions</label><input id="etSes" type="number" min="1" value="${t.sessions||1}"></div>
     </div>
-    <div class="field"><label>Sessions (how many times, one per day)</label><input id="etSes" type="number" min="1" value="${t.sessions||1}"></div>`;
+    <div style="font-size:11.5px;color:var(--ink-faint);margin:-4px 0 12px;line-height:1.45;">How long you think this will take in total (0.5 = 30 min). Stackle fits it around your fixed schedule and spreads it out before the deadline, within your daily study limit.</div>`;
 
   openModal(`
     <h3 style="margin-bottom:14px;">${isNew?'New task':'Edit task'}</h3>
@@ -3502,7 +3506,6 @@ function openEditTaskModal(task){
     t.type = document.getElementById('etType').value;
     t.name = document.getElementById('etName').value||t.name;
     t.dueDate = document.getElementById('etDue').value||t.dueDate;
-    t.startTime = document.getElementById('etStart')?.value||t.startTime; t.endTime = document.getElementById('etEnd')?.value||t.endTime;
     // NOTE: deliberately do NOT auto-create a default "Chapter 1" here — that used to get
     // silently appended to by the Syllabus Library/PDF upload flows, leaving a phantom
     // unwanted chapter in the list. Chapters only get created when the student actually
@@ -3691,19 +3694,16 @@ function openEditTaskModal(task){
 
   // save
   document.getElementById('etSave').onclick=()=>{
-    if(document.getElementById('etType').value!=='exam'){
-      const stV=document.getElementById('etStart')?.value,enV=document.getElementById('etEnd')?.value;
-      if(!stV||!enV||timeToMin(enV)<=timeToMin(stV)){showToast('End time must be after start time.');return;}
-    }
     t.name    = document.getElementById('etName').value.trim()||'Task';
     t.dueDate = document.getElementById('etDue').value;
     t.priority= Number(document.getElementById('etPri').value)||1;
     t.color   = document.getElementById('etColor').value;
     t.type    = document.getElementById('etType').value;
     if(t.type!=='exam'){
-      t.startTime=document.getElementById('etStart').value; t.endTime=document.getElementById('etEnd').value;
+      const hrs=Number(document.getElementById('etHours')?.value)||1;
+      t.durationMin=Math.max(30,Math.round(hrs*2)*30); // total time needed, in 30-min steps
       t.sessions=Math.max(1,Number(document.getElementById('etSes')?.value)||1);
-      t.durationMin=Math.ceil((timeToMin(t.endTime)-timeToMin(t.startTime))/30)*30*t.sessions; // total, kept for the task list
+      delete t.startTime; delete t.endTime; // the scheduler chooses the times
     }
     if(isNew) variableTasks.push(t);
     closeModal();
