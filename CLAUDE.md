@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Stackle (internally still "Daystack" in places) is a student study planner delivered as a **single file: `Stackle.html`** (~3,100 lines of inline HTML, CSS and one `<script>`). There is no build step, package manager, linter or test suite. To run it, open `Stackle.html` in a browser (needs internet only for Google Fonts and the AI APIs). Verify changes by reloading the page. `Stackle Screenshots (1).pdf` and `Timeline.docx` are reference material, not code.
+Stackle (internally still "Daystack" in places) is a student study planner delivered as a **single file: `index.html`** (~3,100 lines of inline HTML, CSS and one `<script>`). There is no build step, package manager, linter or test suite. To run it, open `index.html` in a browser (needs internet only for Google Fonts and the AI APIs). Verify changes by reloading the page. `Stackle Screenshots (1).pdf` and `Timeline.docx` are reference material, not code.
 
 ## Architecture
 
