@@ -1747,7 +1747,7 @@ function openBlockSheet(a){
   const cub=document.getElementById('bsCatchUp');
   if(cub)cub.onclick=()=>{closeModal();completeBlock(a,true);};
   const db=document.getElementById('bsDelete');
-  if(db)db.onclick=()=>{ closeModal(); confirmDeleteTask(t.id); };
+  if(db)db.onclick=()=>{ closeModal(); confirmDeleteTask(t.id,a.id); };
   const vqb=document.getElementById('bsViewQuiz');
   if(vqb)vqb.onclick=()=>{ closeModal(); const att=findQuizAttemptForAssignment(a); if(att) openQuizReviewModal(att); };
 }
@@ -2086,10 +2086,24 @@ function buildTasksTable(taskList, overdue){
 
 // Custom in-app delete confirmation (native window.confirm() can be unreliable/blocked
 // depending on how the page is embedded, which was silently swallowing delete clicks).
-function confirmDeleteTask(taskId){
+function confirmDeleteTask(taskId,assignmentId){
   const t = variableTasks.find(x=>x.id===taskId);
   if(!t) return;
-  openModal(`
+  const blk = assignmentId ? assignments.find(x=>x.id===assignmentId) : null;
+  const sameCount = assignments.filter(x=>x.taskId===taskId).length;
+  // Opened from a calendar block: offer to remove just this one session, or the whole task.
+  // Opened from the Variable Tasks page (no block): only the whole-task option makes sense.
+  openModal(blk ? `
+    <h3 style="margin-bottom:6px;">Delete this task?</h3>
+    <div style="font-size:13.5px;color:var(--ink-soft);margin-bottom:16px;line-height:1.5;">
+      "<b>${t.name}</b>" has ${sameCount} scheduled block${sameCount!==1?'s':''}. Remove only this session (${fmtShort(parseDate(blk.date))}, ${slotLabel(blk.startSlot)}–${slotLabel(blk.startSlot+blk.len)}), or delete the whole task and all its blocks? This can't be undone.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="confirmDelOneBtn" style="border:1.5px solid var(--coral);color:var(--coral);">Delete just this session</button>
+      <button class="btn btn-accent" id="confirmDelBtn" style="background:var(--coral);">Delete all sessions of this task</button>
+      <button class="btn btn-ghost" id="mClose">Cancel</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--ink-faint);margin-top:10px;">Tip: pressing Re-schedule later will plan the task again from scratch.</div>` : `
     <h3 style="margin-bottom:6px;">Delete this task?</h3>
     <div style="font-size:13.5px;color:var(--ink-soft);margin-bottom:16px;">
       "<b>${t.name}</b>" and all its scheduled study blocks will be removed from your calendar. This can't be undone.
@@ -2098,6 +2112,16 @@ function confirmDeleteTask(taskId){
       <button class="btn btn-accent" id="confirmDelBtn" style="background:var(--coral);">Delete task</button>
       <button class="btn btn-ghost" id="mClose">Cancel</button>
     </div>`);
+  const one=document.getElementById('confirmDelOneBtn');
+  if(one)one.onclick=()=>{
+    assignments = assignments.filter(x=>x.id!==blk.id);
+    for(const k of [...completedSlots]) if(k.split('|')[1]===blk.id) completedSlots.delete(k); // forget progress on the removed block
+    closeModal();
+    saveCurrentData();   // no runScheduler() here — that would rebuild the block we just removed
+    refreshTasksView();
+    renderWeek();
+    showToast('Removed this session of "'+t.name+'".');
+  };
   document.getElementById('confirmDelBtn').onclick=()=>{
     variableTasks = variableTasks.filter(x=>x.id!==taskId);
     assignments = assignments.filter(x=>x.taskId!==taskId);
