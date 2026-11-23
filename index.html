@@ -1079,6 +1079,9 @@ function examChaps(task){
 }
 function chapName(task,idx){const c=examChaps(task);return(c[idx]&&c[idx].name)||'Chapter '+(idx+1);}
 function ordinal(n){const s=['th','st','nd','rd'],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);}
+// A chapter is 'challenging' if the student starred it (older chapters fall back to their difficulty rating).
+const fmtHrs=min=>(+((Number(min)||0)/60).toFixed(2))+'h'; // minutes -> '1h', '0.5h', '2.5h'
+const chapIsChallenging=c=>c&&(c.challenging!==undefined?!!c.challenging:(Number(c.difficulty)||0)>=4);
 function chapLen(c){return Math.max(1,Math.ceil((Number(c.durationMin)||30)/30));}
 
 function scheduleRegular(task,asgn,today){
@@ -1196,7 +1199,7 @@ function scheduleExam(task,asgn,today){
     while(dc<=fullEnd){rl.push(new Date(dc));dc=addDays(dc,1);}
     if(!rl.length)rl.push(fullEnd<revFloorBase?revFloorBase:fullEnd);
     chSizes.forEach((len,idx)=>{
-      const rlen=Math.max(1,Math.round(len*0.25));
+      const rlen=Math.max(1,Math.round(len*(chapIsChallenging(chaps[idx])?0.5:0.25))); // starred chapters get double revision time
       const td=rl[idx%rl.length];
       const extra={sessionIndex:idx,phase:'revision',overdue:false,chapterSessionNum:1,chapterSessionTotal:1};
       // All revision passes search from revFloorBase forward (never 'today') so a quick
@@ -1995,7 +1998,7 @@ function buildTasksTable(taskList, overdue){
               <span style="font-size:11px;color:var(--ink-faint);flex-shrink:0;">${i+1}.</span>
               ${pdfIcon}
               <span style="font-size:12.5px;line-height:1.3;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${c.name||'Chapter '+(i+1)}</span>
-              <span style="font-size:11px;color:var(--ink-faint);white-space:nowrap;margin-left:auto;padding-left:8px;">${c.durationMin||60}min</span>
+              <span style="font-size:11px;color:var(--ink-faint);white-space:nowrap;margin-left:auto;padding-left:8px;">${fmtHrs(c.durationMin||60)}</span>
             </div>`;}).join('')}
          </div>`
       : `<span style="color:var(--ink-faint);font-size:12.5px;">—</span>`;
@@ -2017,8 +2020,8 @@ function buildTasksTable(taskList, overdue){
         </td>
         <td style="padding:11px 12px;white-space:nowrap;font-size:13px;${overdue?'color:var(--coral);font-weight:600;':''}">${t.dueDate}</td>
         <td style="padding:11px 12px;white-space:nowrap;">
-          <div style="font-weight:700;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${totalMin} min</div>
-          <div style="font-size:11.5px;color:var(--ink-soft);">${totalH}h total${(!isExam&&t.startTime&&t.endTime)?` · ${t.startTime}–${t.endTime}`:''}</div>
+          <div style="font-weight:700;${overdue?'text-decoration:line-through;color:var(--ink-faint);':''}">${fmtHrs(totalMin)}</div>
+          <div style="font-size:11.5px;color:var(--ink-soft);">${(!isExam&&t.startTime&&t.endTime)?`${t.startTime}–${t.endTime}`:'total'}</div>
         </td>
         <td style="padding:11px 12px;min-width:220px;">${chapCell}</td>
         <td style="padding:11px 8px;white-space:nowrap;">
@@ -2960,7 +2963,7 @@ function renderSyllabusChapterPicker(hostEl, key, t, isNew){
                   <label data-item-row="${it.id}" style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--ink-soft);cursor:pointer;padding:5px 7px;border-radius:7px;background:${selected.has(it.id)?'var(--lav-soft)':'var(--bg)'};">
                     <input type="checkbox" data-item-id="${it.id}" ${selected.has(it.id)?'checked':''} style="width:13px;height:13px;margin-top:2px;flex-shrink:0;">
                     <span style="flex:1;line-height:1.35;">${it.name}</span>
-                    <span style="font-size:10px;color:var(--ink-faint);white-space:nowrap;flex-shrink:0;">${it.durationMin}min</span>
+                    <span style="font-size:10px;color:var(--ink-faint);white-space:nowrap;flex-shrink:0;">${fmtHrs(it.durationMin)}</span>
                   </label>`).join('')}
               </div>
             </div>`;
@@ -3464,7 +3467,7 @@ function openEditTaskModal(task){
            </div>`}
     </div>
     <button class="btn btn-ghost" id="editChapsBtn" style="margin-bottom:10px;font-size:13px;">
-      📝 ${chapCount>0?`Edit chapters (${chapCount})`:'Add chapters'}<span style="font-size:11px;color:var(--ink-faint);"> ${chapMin?chapMin+'min total':''}</span>
+      📝 ${chapCount>0?`Edit chapters (${chapCount})`:'Add chapters'}<span style="font-size:11px;color:var(--ink-faint);"> ${chapMin?fmtHrs(chapMin)+' total':''}</span>
     </button>` : `
     <div class="inline-row">
       <div class="field"><label>Start time</label><input id="etStart" type="time" step="1800" value="${stT}"></div>
@@ -3720,17 +3723,10 @@ function openChaptersModal(task,fromNew){
 
   function chapRows(){
     return task.chapters.map((c,i)=>{
-      const diffLevel = c.difficulty||3;
-      const diffBar = [1,2,3,4,5].map(n=>{
-        const filled = n<=diffLevel;
-        const radius = n===1?'4px 0 0 4px':n===5?'0 4px 4px 0':'0';
-        return `<span data-ci="${i}" data-dv="${n}" title="Difficulty ${n}/5" style="flex:1;height:15px;cursor:pointer;background:${filled?DIFF_COLORS[n-1]:'var(--line)'};border-radius:${radius};transition:background .1s;"></span>`;
-      }).join('');
+      const isCh = chapIsChallenging(c);
       const difficultyCell = `
-        <div style="display:flex;flex-direction:column;gap:2px;width:96px;">
-          <div class="diff-bar" data-ci="${i}" style="display:flex;gap:1px;">${diffBar}</div>
-          <div style="display:flex;justify-content:space-between;font-size:8px;color:var(--ink-faint);"><span>Easy</span><span>Very difficult</span></div>
-        </div>`;
+        <button data-chstar="${i}" title="${isCh?'Marked as challenging — click to unmark':'Mark as challenging'}" aria-pressed="${isCh}"
+          style="border:none;background:none;cursor:pointer;font-size:24px;line-height:1;padding:0 6px;color:${isCh?'#E0394A':'#C9CEDA'};">${isCh?'★':'☆'}</button>`;
       const hasGQ = Array.isArray(c.guidingQuestions) && c.guidingQuestions.length>0;
       const isOpen = expandedRows.has(i);
       const mainRow = `<tr draggable="true" data-chrow="${i}" style="transition:background .12s;">
@@ -3745,8 +3741,8 @@ function openChaptersModal(task,fromNew){
             </button>`:''}
         </td>
         <td style="padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">
-          <input type="number" min="5" step="5" value="${c.durationMin||60}" data-ci="${i}" data-cf="dur"
-            style="width:72px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;font-size:13.5px;"> <small style="color:var(--ink-soft);">min</small>
+          <input type="number" min="0.5" step="0.5" value="${+((c.durationMin||60)/60).toFixed(2)}" data-ci="${i}" data-cf="dur"
+            style="width:72px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;font-size:13.5px;"> <small style="color:var(--ink-soft);">hour(s)</small>
         </td>
         <td style="padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">
           <input type="number" min="1" max="8" step="1" value="${c.sessions||1}" data-ci="${i}" data-cf="sessions"
@@ -3785,16 +3781,20 @@ function openChaptersModal(task,fromNew){
 
   openModal(`
     <h3 style="margin-bottom:4px;">${(task.name||'Exam')} — Chapters</h3>
-    <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:14px;">Drag ⠿ to reorder chapters. Harder chapters (more ★) are studied first.</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:14px;">Drag ⠿ to reorder chapters. Tap the ★ on chapters you find challenging — Stackle gives them extra revision time.</div>
+    <div id="sessInfoBox" style="display:none;background:var(--lav-soft);border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.5;color:var(--ink);margin-bottom:12px;">
+      <b>What are sessions?</b> One session means the chapter's total study time is done in one sitting. With 2 sessions, the total study time is split into 2 equal sessions; with 4 sessions, into 4 equal sessions.<br>
+      <span style="color:var(--ink-soft);">Example: 2 hours with 4 sessions = 4 × 30-minute sessions.</span>
+    </div>
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;">
         <thead>
           <tr style="border-bottom:2px solid var(--line);">
             <th style="width:24px;"></th>
             <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);">Chapter title</th>
-            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;">Study time</th>
-            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;" title="Split the study time into this many separate sessions, e.g. 3 hours ÷ 3 sessions = 3×1hr blocks">Sessions</th>
-            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);">Difficulty</th>
+            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;" title="Total study time for this chapter, in hours (0.5 = 30 minutes)">Study time (hours)</th>
+            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;" >Sessions <button type="button" id="sessInfoBtn" title="One session = all the study time in one sitting. 2 sessions = total study time split into 2 equal sessions; 4 sessions = split into 4 equal sessions." aria-label="What are sessions?" style="border:1px solid var(--lav);background:#fff;color:var(--lav);border-radius:50%;width:17px;height:17px;font-size:11px;font-weight:800;line-height:1;cursor:pointer;padding:0;vertical-align:middle;">i</button></th>
+            <th style="text-align:left;padding:6px 8px;font-size:12px;font-weight:700;color:var(--ink-soft);white-space:nowrap;" title="Star the chapters you find hard">Challenging</th>
             <th style="width:32px;"></th>
           </tr>
         </thead>
@@ -3813,15 +3813,17 @@ function openChaptersModal(task,fromNew){
       inp.addEventListener('input',()=>{
         const i=Number(inp.dataset.ci);
         if(inp.dataset.cf==='name') task.chapters[i].name=inp.value;
-        if(inp.dataset.cf==='dur')  task.chapters[i].durationMin=Number(inp.value)||30;
+        if(inp.dataset.cf==='dur')  task.chapters[i].durationMin=Math.max(30,Math.round((Number(inp.value)||0.5)*2)*30); // hours → minutes, in 30-min steps
         if(inp.dataset.cf==='sessions') task.chapters[i].sessions=Math.max(1,Math.min(8,Number(inp.value)||1));
       });
       inp.addEventListener('focus',()=>inp.style.borderColor='var(--lav)');
       inp.addEventListener('blur', ()=>inp.style.borderColor='var(--line)');
     });
-    document.querySelectorAll('[data-dv]').forEach(seg=>{
-      seg.onclick=()=>{ task.chapters[Number(seg.dataset.ci)].difficulty=Number(seg.dataset.dv); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
+    document.querySelectorAll('[data-chstar]').forEach(btn=>{
+      btn.onclick=()=>{ const c=task.chapters[Number(btn.dataset.chstar)]; c.challenging=!chapIsChallenging(c); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
     });
+    const infoBtn=document.getElementById('sessInfoBtn'),infoBox=document.getElementById('sessInfoBox');
+    if(infoBtn&&infoBox)infoBtn.onclick=()=>{infoBox.style.display=infoBox.style.display==='none'?'block':'none';};
     document.querySelectorAll('[data-crd]').forEach(b=>{
       b.onclick=()=>{ const i=Number(b.dataset.crd); if(task.chapters.length<=1){showToast('Need at least one chapter.');return;} task.chapters.splice(i,1); document.getElementById('chapRows').innerHTML=chapRows(); bind(); };
     });
