@@ -282,6 +282,12 @@ textarea.notes-ta:focus{outline:2px solid var(--sun);}
   background:linear-gradient(135deg,var(--mint),#2da870);color:#fff;cursor:pointer;
   box-shadow:0 6px 24px rgba(63,191,147,0.45);display:none;margin-bottom:16px;}
 .fo-complete-btn.show{display:block;}
+.fo-dots{display:flex;gap:8px;justify-content:center;margin:-18px 0 22px;flex-wrap:wrap;}
+.fo-dots span{width:12px;height:12px;border-radius:50%;background:rgba(255,255,255,0.18);}
+.fo-dots span.on{background:var(--mint);}
+.fo-dots span.cur{background:var(--sun);box-shadow:0 0 0 3px rgba(255,200,87,0.25);}
+.fo-msg{max-width:420px;font-size:13.5px;line-height:1.55;color:#fff;background:rgba(63,191,147,0.18);border:1px solid rgba(63,191,147,0.4);border-radius:12px;padding:12px 16px;margin-bottom:22px;}
+.fo-skip-btn{border:none;border-radius:12px;padding:13px 30px;font-size:15px;font-weight:800;background:rgba(255,255,255,0.92);color:#2D1F5E;cursor:pointer;margin-bottom:14px;}
 .fo-exit-btn{border:none;background:rgba(255,255,255,0.08);border-radius:10px;padding:11px 24px;
   font-size:13.5px;font-weight:600;color:rgba(255,255,255,0.5);cursor:pointer;margin-top:4px;}
 .fo-exit-btn:hover{background:rgba(255,255,255,0.14);color:rgba(255,255,255,0.8);}
@@ -290,7 +296,7 @@ textarea.notes-ta:focus{outline:2px solid var(--sun);}
 
 /* sticker celebration */
 #stickerPop{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(0);
-  background:#fff;border-radius:24px;padding:28px 32px;text-align:center;z-index:150;
+  background:#fff;border-radius:24px;padding:28px 32px;text-align:center;z-index:260;
   box-shadow:0 20px 60px rgba(0,0,0,0.25);transition:transform .3s cubic-bezier(.34,1.56,.64,1);}
 #stickerPop.show{transform:translate(-50%,-50%) scale(1);}
 #stickerPop .sp-emoji{font-size:64px;display:block;margin-bottom:8px;}
@@ -564,16 +570,18 @@ table.ch-table input:focus{border-color:var(--lav);outline:none;background:#fff;
 
   <!-- FOCUS MODE OVERLAY (shared) -->
   <div id="focusOverlay">
-    <div class="fo-badge">🎯 FOCUS MODE</div>
-    <div class="fo-title">Time to focus!</div>
-    <div class="fo-sub">Put your phone face-down. You've got this.</div>
+    <div class="fo-badge" id="foBadge">🎯 FOCUS MODE</div>
+    <div class="fo-title" id="foTitle">Time to focus!</div>
+    <div class="fo-sub" id="foSub">Put your phone face-down. You've got this.</div>
     <div class="fo-task-name" id="foTaskName"></div>
     <div class="fo-phase" id="foPhase"></div>
-    <div class="fo-timer" id="foTimer">30:00</div>
-    <div class="fo-timer-label">minutes remaining</div>
-    <div class="fo-warn" id="foWarn">⚠️ Timer restarted — stay on this screen to keep your progress!</div>
-    <button class="fo-complete-btn" id="foComplete">✅ Mark complete &amp; earn ⭐</button>
-    <button class="fo-exit-btn" id="foExit">Exit (timer will restart next time)</button>
+    <div class="fo-timer" id="foTimer">25:00</div>
+    <div class="fo-timer-label" id="foLabel">minutes of focus remaining</div>
+    <div class="fo-dots" id="foDots"></div>
+    <div class="fo-msg" id="foMsg" style="display:none;"></div>
+    <div class="fo-warn" id="foWarn">⚠️ You left the screen — this 25-minute round restarted. Stay on this screen to keep your progress!</div>
+    <button class="fo-skip-btn" id="foSkip" style="display:none;">Skip break →</button>
+    <button class="fo-exit-btn" id="foExit">Exit (rounds you finished are saved)</button>
     <button class="fo-ff-btn" id="foFF">⏩ Fast-forward for demo</button>
   </div>
 
@@ -927,7 +935,6 @@ let weekStart=mondayOf(new Date());
 let viewStart=14,viewEnd=46,dayCount=7; // week view, 07:00-23:00 by default
 let lastUnscheduled=[];
 let currentTab='cal';
-let focusAssignmentRef=null; // tracks active focus session
 let timerInterval=null;
 
 /* =============================================
@@ -1394,6 +1401,7 @@ function awardSticker(rarity,reason){
   showStickerPop(emoji,rarity,reason);
   updateStats();
   saveCurrentData();
+  return emoji;
 }
 function showStickerPop(emoji,rarity,reason){
   const pop=document.getElementById('stickerPop');
@@ -1777,7 +1785,7 @@ function openBlockSheet(a){
     const durLabel = a.len*30<60 ? (a.len*30)+'-min' : (((a.len*30)/60)%1===0?((a.len*30)/60):((a.len*30)/60).toFixed(1))+'-hour';
     body+=`<div style="background:var(--sun-soft);border-radius:12px;padding:14px;margin-bottom:12px;text-align:center;">
       <div style="font-size:12px;font-weight:700;color:var(--ink-soft);margin-bottom:4px;">READY TO FOCUS?</div>
-      <div style="font-size:13px;color:var(--ink-soft);">A ${durLabel} countdown will start. Stay on the focus screen to keep your ⭐ reward.</div>
+      <div style="font-size:13px;color:var(--ink-soft);line-height:1.5;">Pomodoro style: <b>25 min focus + 5 min break</b>, ${a.len-done} round${a.len-done!==1?'s':''} in this block. Earn a ⭐ sticker for every 25 minutes, and a 20-min long break after 4 rounds. Stay on the focus screen to keep your progress.</div>
     </div>
     <button class="btn btn-accent" id="bsStartFocus">🎯 Start focus session</button>`;
   } else if(isPast){
@@ -1896,61 +1904,116 @@ function openFixedDetail(fs,slot,len){
 /* =============================================
    FOCUS MODE OVERLAY ENGINE
    ============================================= */
+/* =============================================
+   POMODORO FOCUS MODE
+   Every study block is worked in Pomodoro rounds: 25 min focus -> 5 min break (skippable) -> next 25 min ...
+   Each 25-min round earns a sticker and ticks off one 30-min unit of the block. After 4 rounds in a row
+   (2 hours) the student is congratulated and prompted to take a 20-min long break.
+   The timer uses wall-clock time (endAt), so it stays accurate even if the tab is throttled.
+   ============================================= */
+const POMO_FOCUS=25*60, POMO_BREAK=5*60, POMO_LONG=20*60, POMO_ROUNDS=4;
 let focusAssignment=null;
-let focusDurationSecs=30*60; // set per-session to match the actual block length (a.len × 30 min)
-let focusSecs=30*60;
-let focusComplete=false; // true once timer hits 0 — only then is reward earnable
+let pomo=null; // {a,t,ph,total,done,phase:'focus'|'break'|'long',secs,endAt}
+const promptedBlocks=new Set(); // blocks we have already offered to start this page-load
 
+function pomoSignal(){
+  try{if(navigator.vibrate&&(!navigator.userActivation||navigator.userActivation.hasBeenActive))navigator.vibrate([200,100,200]);}catch(e){}
+  try{const C=window.AudioContext||window.webkitAudioContext;if(!C)return;
+    const c=new C(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);
+    o.frequency.value=880;g.gain.setValueAtTime(.12,c.currentTime);o.start();o.stop(c.currentTime+.25);setTimeout(()=>c.close(),500);}catch(e){}
+}
 function startFocusMode(a,t,ph){
+  const remaining=Math.max(1,(a.len||1)-countDone(a)); // one round per unfinished 30-min unit
   focusAssignment=a;
-  focusDurationSecs=Math.max(1,a.len||1)*30*60; // e.g. a 1-hour block (len=2) → 3600s, not always 30 min
-  focusSecs=focusDurationSecs;focusComplete=false;
-  document.getElementById('foTaskName').textContent=t.name;
-  document.getElementById('foPhase').textContent=ph||('Session · '+slotLabel(a.startSlot)+'–'+slotLabel(a.startSlot+a.len));
-  document.getElementById('foWarn').classList.remove('show');
-  document.getElementById('foComplete').classList.remove('show');
-  updateFoTimer();
-  document.getElementById('focusOverlay').classList.add('active');
-  clearInterval(timerInterval);
-  timerInterval=setInterval(focusTick,1000);
-  // detect if user leaves the screen
+  pomo={a,t,ph,total:remaining,done:0,phase:'focus',secs:POMO_FOCUS,endAt:0};
+  const $=id=>document.getElementById(id);
+  $('foTaskName').textContent=(t.type==='exam'?'Study for ':'')+t.name;
+  $('foPhase').textContent=ph||('Block · '+slotLabel(a.startSlot)+'–'+slotLabel(a.startSlot+a.len));
+  $('foWarn').classList.remove('show');
+  $('focusOverlay').classList.add('active');
   document.addEventListener('visibilitychange',onFocusBlur);
   window.addEventListener('blur',onFocusBlur);
+  pomoStart('focus');
 }
-
-function focusTick(){
-  focusSecs--;
+function pomoStart(phase,msg){
+  pomo.phase=phase;
+  pomo.secs=phase==='focus'?POMO_FOCUS:phase==='break'?POMO_BREAK:POMO_LONG;
+  pomo.endAt=Date.now()+pomo.secs*1000;
+  pomoRender(msg);
   updateFoTimer();
-  if(focusSecs<=0){
-    clearInterval(timerInterval);
-    focusComplete=true;
-    document.getElementById('foComplete').classList.add('show');
-    document.getElementById('foTimer').textContent='00:00';
-    document.getElementById('foTimer').style.color=document.getElementById('foComplete').style.color='var(--mint)';
-    // soft vibration on supported devices
-    if(navigator.vibrate)navigator.vibrate([200,100,200]);
+  clearInterval(timerInterval);
+  timerInterval=setInterval(pomoTick,250);
+}
+function pomoRemaining(){return pomo?Math.max(0,Math.ceil((pomo.endAt-Date.now())/1000)):0;}
+function pomoTick(){if(!pomo)return;updateFoTimer();if(pomoRemaining()<=0)pomoPhaseDone();}
+function updateFoTimer(){
+  const r=pomoRemaining();
+  const el=document.getElementById('foTimer');
+  if(el)el.textContent=String(Math.floor(r/60)).padStart(2,'0')+':'+String(r%60).padStart(2,'0');
+}
+function pomoRender(msg){
+  const $=id=>document.getElementById(id),p=pomo.phase;
+  const round=Math.min(pomo.total,pomo.done+1);
+  $('foBadge').textContent=p==='focus'?'🎯 FOCUS · ROUND '+round+' OF '+pomo.total:p==='break'?'☕ SHORT BREAK':'🏆 LONG BREAK';
+  $('foTitle').textContent=p==='focus'?'Time to focus!':p==='break'?'Take a short break':'Amazing focus!';
+  const left=pomo.total-pomo.done;
+  $('foSub').textContent=p==='focus'?"Put your phone face-down. You've got this."
+    :p==='break'?'Stretch, sip some water. Your next 25-minute focus session starts automatically when this ends.'
+    :'Take a 20-minute break — walk around, eat something and rest your eyes.'+(left>0?' Your next focus session starts after.':'');
+  $('foLabel').textContent=p==='focus'?'minutes of focus remaining':p==='break'?'break remaining':'long break remaining';
+  $('foTimer').style.color=p==='focus'?'':p==='break'?'var(--mint)':'var(--sun)';
+  $('foDots').innerHTML=Array.from({length:pomo.total},(_,i)=>`<span class="${i<pomo.done?'on':(i===pomo.done&&p==='focus'?'cur':'')}"></span>`).join('');
+  $('foMsg').innerHTML=msg||'';
+  $('foMsg').style.display=msg?'block':'none';
+  $('foSkip').style.display=p==='focus'?'none':'inline-block';
+  $('foSkip').textContent=p==='long'?'Skip long break →':'Skip break →';
+  $('foWarn').classList.remove('show');
+  $('focusOverlay').dataset.phase=p;
+}
+function completePomodoro(a){
+  // one 25-min round = one 30-min unit of this block (keyed by assignment id, so it can't leak onto another block)
+  for(let i=0;i<a.len;i++){const k=a.date+'|'+a.id+'|'+i;if(!completedSlots.has(k)){completedSlots.add(k);break;}}
+  const emoji=awardSticker('common','25 minutes of focus! 🎉');
+  checkDayMilestones();
+  renderWeek();saveCurrentData();
+  return emoji;
+}
+function pomoPhaseDone(){
+  clearInterval(timerInterval);
+  pomoSignal();
+  if(pomo.phase==='focus'){
+    pomo.done++;
+    const emoji=completePomodoro(pomo.a);
+    const earned=`⭐ You earned a sticker ${emoji||''} for 25 minutes of focus!`;
+    const left=pomo.total-pomo.done;
+    if(pomo.done%POMO_ROUNDS===0){
+      pomoStart('long',`🎉 <b>Congratulations!</b> You kept your focus for ${POMO_ROUNDS} rounds in a row (2 hours). Time for a 20-minute long break.<br>${earned}`);
+    }else if(left>0){
+      pomoStart('break',earned);
+    }else{
+      pomoFinish();
+    }
+  }else{
+    pomoAfterBreak();
   }
 }
-function updateFoTimer(){
-  const m=String(Math.floor(Math.max(0,focusSecs)/60)).padStart(2,'0');
-  const s=String(Math.max(0,focusSecs)%60).padStart(2,'0');
-  const el=document.getElementById('foTimer');if(el)el.textContent=m+':'+s;
+function pomoAfterBreak(){
+  clearInterval(timerInterval);
+  if(pomo.total-pomo.done>0)pomoStart('focus');else pomoFinish();
+}
+function pomoFinish(){
+  const a=pomo.a,t=pomo.t;
+  exitFocusMode();
+  showToast('🎉 Study block complete — great focus!');
+  if(t&&t.type==='exam')setTimeout(()=>openQuizModal(a),600); // quiz once the whole block is done
 }
 function onFocusBlur(){
-  // only penalise if the timer is still running (not yet complete)
-  if(!focusComplete&&document.getElementById('focusOverlay').classList.contains('active')){
-    clearInterval(timerInterval);
-    focusSecs=focusDurationSecs; // restart at the full block duration, not a hardcoded 30 min
-    updateFoTimer();
-    document.getElementById('foWarn').classList.add('show');
-    // restart after 1s delay so the warning is readable
-    setTimeout(()=>{
-      if(document.getElementById('focusOverlay').classList.contains('active')&&!focusComplete){
-        clearInterval(timerInterval);
-        timerInterval=setInterval(focusTick,1000);
-      }
-    },1500);
-  }
+  // Leaving the screen only costs you during a focus round (breaks are free): the 25 minutes restart.
+  if(!pomo||pomo.phase!=='focus'||!document.getElementById('focusOverlay').classList.contains('active'))return;
+  pomo.endAt=Date.now()+POMO_FOCUS*1000;
+  updateFoTimer();
+  const w=document.getElementById('foWarn');w.classList.add('show');
+  clearTimeout(onFocusBlur._t);onFocusBlur._t=setTimeout(()=>w.classList.remove('show'),4000);
 }
 function exitFocusMode(){
   clearInterval(timerInterval);
@@ -1958,23 +2021,47 @@ function exitFocusMode(){
   document.getElementById('foTimer').style.color='';
   document.removeEventListener('visibilitychange',onFocusBlur);
   window.removeEventListener('blur',onFocusBlur);
-  focusAssignment=null;focusSecs=focusDurationSecs;focusComplete=false;
+  focusAssignment=null;pomo=null;
 }
-
-document.getElementById('foComplete').onclick=()=>{
-  if(!focusComplete){showToast('Timer hasn\'t finished yet — stay focused!');return;}
-  const a=focusAssignment;
-  exitFocusMode();
-  if(a)completeBlock(a,false);
+document.getElementById('foSkip').onclick=()=>{
+  if(pomo&&pomo.phase!=='focus')pomoAfterBreak();
 };
 document.getElementById('foExit').onclick=()=>{
   exitFocusMode();
-  showToast('Focus session exited — timer will restart next time.');
+  showToast('Focus session ended — rounds you completed are saved.');
 };
 document.getElementById('foFF').onclick=()=>{
-  // fast-forward for demo: jump timer to last 5 seconds
-  focusSecs=5;updateFoTimer();
+  // fast-forward for demo: jump the current phase to its last 5 seconds
+  if(pomo){pomo.endAt=Date.now()+5000;updateFoTimer();}
 };
+
+// At the start of each study block, offer to begin a focus session (once per block).
+function checkBlockStartPrompt(){
+  if(!currentUser||pomo)return;
+  if(document.getElementById('modalOverlay').classList.contains('show'))return;
+  if(typeof tutorialActive==='function'&&tutorialActive())return;
+  const now=new Date(),todayK=dateKey(now),nowMin=now.getHours()*60+now.getMinutes();
+  const a=assignments.find(x=>x.date===todayK&&nowMin>=x.startSlot*30&&nowMin<(x.startSlot+x.len)*30&&countDone(x)<x.len&&!promptedBlocks.has(x.id));
+  if(!a)return;
+  const t=variableTasks.find(x=>x.id===a.taskId);if(!t)return;
+  promptedBlocks.add(a.id);
+  const ph=blockPhaseLabel(a,t),rounds=a.len-countDone(a);
+  openModal(`
+    <div style="text-align:center;">
+      <div style="font-size:40px;margin-bottom:6px;">⏰</div>
+      <h3 style="margin-bottom:6px;">Time to study!</h3>
+      <div style="font-size:14px;font-weight:700;margin-bottom:2px;">${t.type==='exam'?'Study for ':''}${t.name}</div>
+      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:12px;">${ph?ph+' · ':''}${slotLabel(a.startSlot)}–${slotLabel(a.startSlot+a.len)}</div>
+      <div style="background:var(--sun-soft);border-radius:12px;padding:12px;font-size:13px;color:var(--ink-soft);margin-bottom:14px;line-height:1.5;">
+        Start a <b>25-minute focus session</b>, then a 5-minute break — ${rounds} round${rounds!==1?'s':''} in this block. Earn a ⭐ sticker for every 25 minutes!
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-accent" id="pomoPromptStart">🎯 Start focus session</button>
+      <button class="btn btn-ghost" id="mClose">Not now</button>
+    </div>`);
+  document.getElementById('pomoPromptStart').onclick=()=>{closeModal();startFocusMode(a,t,ph);};
+}
 
 /* =============================================
    COMPLETE BLOCK + CONFIDENCE FLOW
@@ -4788,6 +4875,7 @@ function initApp(){
   clearInterval(window._saveT);clearInterval(window._renderT);
   window._saveT=setInterval(saveIfChanged,2000);   // saves (and cloud-syncs) any change within ~2s
   window._renderT=setInterval(renderWeek,60000);
+  clearInterval(window._promptT);window._promptT=setInterval(checkBlockStartPrompt,15000);setTimeout(checkBlockStartPrompt,1500); // offer a focus session when a block starts
   if(tutorialActive())tutorialSync();
 }
 
