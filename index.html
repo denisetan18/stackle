@@ -759,6 +759,7 @@ async function logoutUser(){
   }
   currentUser=null; ud={}; pendingRemote=null;
   if(typeof tutorialHide==='function')tutorialHide();
+  if(typeof hidePomoPrompt==='function')hidePomoPrompt();
   document.getElementById('app').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('loginUser').value='';
@@ -2035,33 +2036,56 @@ document.getElementById('foFF').onclick=()=>{
   if(pomo){pomo.endAt=Date.now()+5000;updateFoTimer();}
 };
 
-// At the start of each study block, offer to begin a focus session (once per block).
+// At the start of each study block, pop up an offer to begin a focus session (once per block).
+// It is a floating card (not a modal), so it appears even if another window is open, and it is checked every
+// second so it shows right at the block's start time. If the tab is in the background, a browser notification
+// is sent instead (when the student has allowed notifications).
+function hidePomoPrompt(){const el=document.getElementById('pomoPrompt');if(el)el.remove();}
 function checkBlockStartPrompt(){
-  if(!currentUser||pomo)return;
-  if(document.getElementById('modalOverlay').classList.contains('show'))return;
-  if(typeof tutorialActive==='function'&&tutorialActive())return;
+  if(!currentUser)return;
   const now=new Date(),todayK=dateKey(now),nowMin=now.getHours()*60+now.getMinutes();
+  const old=document.getElementById('pomoPrompt');
+  if(old&&Number(old.dataset.endMin)<=nowMin){hidePomoPrompt();} // the block ended while the card was up
+  if(pomo||old)return;                                          // already focusing, or a card is already showing
+  if(typeof tutorialActive==='function'&&tutorialActive())return;
   const a=assignments.find(x=>x.date===todayK&&nowMin>=x.startSlot*30&&nowMin<(x.startSlot+x.len)*30&&countDone(x)<x.len&&!promptedBlocks.has(x.id));
   if(!a)return;
   const t=variableTasks.find(x=>x.id===a.taskId);if(!t)return;
   promptedBlocks.add(a.id);
   const ph=blockPhaseLabel(a,t),rounds=a.len-countDone(a);
-  openModal(`
-    <div style="text-align:center;">
-      <div style="font-size:40px;margin-bottom:6px;">⏰</div>
-      <h3 style="margin-bottom:6px;">Time to study!</h3>
-      <div style="font-size:14px;font-weight:700;margin-bottom:2px;">${t.type==='exam'?'Study for ':''}${t.name}</div>
-      <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:12px;">${ph?ph+' · ':''}${slotLabel(a.startSlot)}–${slotLabel(a.startSlot+a.len)}</div>
-      <div style="background:var(--sun-soft);border-radius:12px;padding:12px;font-size:13px;color:var(--ink-soft);margin-bottom:14px;line-height:1.5;">
-        Start a <b>25-minute focus session</b>, then a 5-minute break — ${rounds} round${rounds!==1?'s':''} in this block. Earn a ⭐ sticker for every 25 minutes!
-      </div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-accent" id="pomoPromptStart">🎯 Start focus session</button>
-      <button class="btn btn-ghost" id="mClose">Not now</button>
-    </div>`);
-  document.getElementById('pomoPromptStart').onclick=()=>{closeModal();startFocusMode(a,t,ph);};
+  const title=(t.type==='exam'?'Study for ':'')+t.name;
+  if(!document.getElementById('pomoPromptStyle')){
+    const st=document.createElement('style');st.id='pomoPromptStyle';
+    st.textContent=`#pomoPrompt{position:fixed;top:14px;left:50%;transform:translateX(-50%);width:min(430px,calc(100vw - 24px));z-index:270;background:#fff;border-radius:18px;
+      padding:16px 18px;box-shadow:0 16px 48px rgba(31,42,68,.35);border:2px solid var(--coral);animation:pomoIn .35s cubic-bezier(.34,1.56,.64,1);}
+      @keyframes pomoIn{from{opacity:0;transform:translateX(-50%) translateY(-24px) scale(.96);}to{opacity:1;transform:translateX(-50%);}}
+      #pomoPrompt .pp-row{display:flex;gap:8px;margin-top:12px;}
+      #pomoPrompt .pp-row button{flex:1;border:none;border-radius:11px;padding:11px;font-size:14px;font-weight:700;cursor:pointer;}
+      #pomoPrompt .pp-go{background:var(--coral);color:#fff;} #pomoPrompt .pp-no{background:var(--bg);color:var(--ink);}`;
+    document.head.appendChild(st);
+  }
+  const el=document.createElement('div');el.id='pomoPrompt';el.dataset.endMin=String((a.startSlot+a.len)*30);
+  const canAsk=('Notification' in window)&&Notification.permission==='default';
+  el.innerHTML=`<div style="display:flex;align-items:center;gap:10px;">
+      <div style="font-size:30px;">⏰</div>
+      <div style="min-width:0;"><div style="font-size:16px;font-weight:800;">Time to study!</div>
+      <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${title}</div>
+      <div style="font-size:12px;color:var(--ink-soft);">${ph?ph+' · ':''}${slotLabel(a.startSlot)}–${slotLabel(a.startSlot+a.len)}</div></div></div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin-top:8px;line-height:1.5;">Start a <b>25-minute focus session</b>, then a 5-minute break — ${rounds} round${rounds!==1?'s':''} in this block. Earn a ⭐ sticker for every 25 minutes!</div>
+    <div class="pp-row"><button class="pp-go" id="pomoPromptStart">🎯 Start focus session</button><button class="pp-no" id="pomoPromptNo">Not now</button></div>
+    ${canAsk?'<button id="pomoPromptNotify" style="border:none;background:none;color:var(--lav);font-size:11.5px;font-weight:700;cursor:pointer;margin-top:8px;padding:0;">🔔 Also notify me when this tab is in the background</button>':''}`;
+  document.body.appendChild(el);
+  document.getElementById('pomoPromptStart').onclick=()=>{hidePomoPrompt();startFocusMode(a,t,ph);};
+  document.getElementById('pomoPromptNo').onclick=hidePomoPrompt;
+  const nb=document.getElementById('pomoPromptNotify');
+  if(nb)nb.onclick=()=>{try{Notification.requestPermission().then(r=>{nb.textContent=r==='granted'?'✅ Notifications on':'Notifications blocked in your browser';});}catch(e){}};
+  pomoSignal(); // chime so it is noticed
+  if('Notification' in window&&Notification.permission==='granted'&&document.visibilityState!=='visible'){
+    try{const n=new Notification('⏰ Time to study!',{body:title+' · '+slotLabel(a.startSlot)+'–'+slotLabel(a.startSlot+a.len)+'\nOpen Stackle to start your 25-minute focus session.',tag:'stackle-'+a.id});n.onclick=()=>{window.focus();n.close();};}catch(e){}
+  }
 }
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')checkBlockStartPrompt();});
+window.addEventListener('focus',()=>checkBlockStartPrompt());
 
 /* =============================================
    COMPLETE BLOCK + CONFIDENCE FLOW
@@ -4875,7 +4899,7 @@ function initApp(){
   clearInterval(window._saveT);clearInterval(window._renderT);
   window._saveT=setInterval(saveIfChanged,2000);   // saves (and cloud-syncs) any change within ~2s
   window._renderT=setInterval(renderWeek,60000);
-  clearInterval(window._promptT);window._promptT=setInterval(checkBlockStartPrompt,15000);setTimeout(checkBlockStartPrompt,1500); // offer a focus session when a block starts
+  clearInterval(window._promptT);window._promptT=setInterval(checkBlockStartPrompt,1000);setTimeout(checkBlockStartPrompt,500); // offer a focus session when a block starts
   if(tutorialActive())tutorialSync();
 }
 
